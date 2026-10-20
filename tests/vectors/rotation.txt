@@ -1,6 +1,8 @@
-home-crypto/v1/rotation
+home-crypto/v2/rotation
 space-id: 5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a
 from-epoch: 1
 to-epoch: 2
 to-recipient-sha256: f82ce0f6b51e996319232f3cd59287839d4fd43a88caf96eb85101eccaa302b9
 removed: b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0
+signed-by: a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1
+signature: 528b2b71a84f28da4cf1fff34df698638df4ba09782351c495d0d6b3cd7ad5197a57be2e67760a3df4758666f33d84b15988a5acbbacb5e609f02b59e1820e0a

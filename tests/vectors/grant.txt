@@ -1,5 +1,7 @@
-home-crypto/v1/grant
+home-crypto/v2/grant
 space-id: 5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a
 epoch: 1
-granted-by: a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1
+granted-to: b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0
 space-identity: AGE-SECRET-KEY-18T09KJ9EH53K7E2R40KRPUCZ0US04TM6LRNJAHWDZLM5PWYLLSKSPFGH3T
+signed-by: a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1
+signature: ecb7977aa3821afd2d881a662be7c8d74ccc0ce8d51afd0042417179e44d7db776b92eced610cfec757e60f6bdb597457e097c81f8938951854fee697a9d4e04

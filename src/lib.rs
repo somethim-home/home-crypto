@@ -27,6 +27,7 @@ pub mod manifest;
 pub mod object;
 mod record;
 pub mod share;
+pub mod sign;
 pub mod space;
 
 pub use age::secrecy::{ExposeSecret, SecretString};

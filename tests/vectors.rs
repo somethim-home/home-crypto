@@ -7,6 +7,7 @@ use home_crypto::ids::{DeviceId, ObjectId, SpaceId, UserId};
 use home_crypto::keyring::Keyring;
 use home_crypto::manifest::{Change, FileEntry, ManifestPath, ManifestState, SegmentKind};
 use home_crypto::object::{self, ContentInfo, ObjectReader};
+use home_crypto::sign::VerifyingKey;
 use home_crypto::space::{Epoch, Fingerprint, Grant, Member, Role, Roster, Rotation, SpaceKey};
 use home_crypto::{ExposeSecret, SecretString, share};
 
@@ -22,6 +23,8 @@ const EPOCH2_KEY: &str =
     "AGE-SECRET-KEY-1F52ZUHDNH9UR8D26ZJTKZG86X6KYYRESZMT2E6FH64VTAZCJY4SQM8YALN";
 const BOB_GRANT_KEY: &str =
     "AGE-SECRET-KEY-17FV7E7M6FXFRNTMCTF2M7E5PUVEKZC4325UDZDZHZP6ZV3T8XQZQAQLSF3";
+const ALICE_SIGNING_KEY: &str = "b1223f32b728c42bedf595d82c722c3986ee8cd2157756dc6cf6fbce408188d2";
+const BOB_SIGNING_KEY: &str = "27d0feb6f6d6bda0ad579977a1d2bd6b4c3abc9ca066f45ab43c552d87720aee";
 const PASSPHRASE: &str = "correct horse battery staple";
 const ALICE: UserId = UserId([0xa1; 16]);
 const BOB: UserId = UserId([0xb0; 16]);
@@ -40,8 +43,17 @@ fn recipient_of(secret: &str) -> age::x25519::Recipient {
     secret.parse::<age::x25519::Identity>().unwrap().to_public()
 }
 
+fn user_record(user: UserId, grant: &str, signing: &str) -> String {
+    format!(
+        "home-crypto/v2/user-identity\nuser-id: {user}\ngrant-identity: {grant}\n\
+         keyring-identity: {KEYRING_KEY}\nsigning-key: {signing}\nrecovery-recipient: {}\n",
+        recipient_of(RECOVERY_KEY)
+    )
+}
+
 struct Fixtures {
     alice: UserKeys,
+    bob: UserKeys,
     recovery: RecoveryKey,
     epoch1: SpaceKey,
     epoch2: SpaceKey,
@@ -54,17 +66,17 @@ struct Fixtures {
 }
 
 fn fixtures() -> Fixtures {
-    let record = format!(
-        "home-crypto/v1/user-identity\nuser-id: {ALICE}\ngrant-identity: {GRANT_KEY}\n\
-         keyring-identity: {KEYRING_KEY}\nrecovery-recipient: {}\n",
-        recipient_of(RECOVERY_KEY)
-    );
-    let alice = UserKeys::decode(record.as_bytes()).unwrap();
+    let alice =
+        UserKeys::decode(user_record(ALICE, GRANT_KEY, ALICE_SIGNING_KEY).as_bytes()).unwrap();
+    let bob =
+        UserKeys::decode(user_record(BOB, BOB_GRANT_KEY, BOB_SIGNING_KEY).as_bytes()).unwrap();
     let epoch1 = SpaceKey::parse(SPACE, Epoch(1), EPOCH1_KEY).unwrap();
     let epoch2 = SpaceKey::parse(SPACE, Epoch(2), EPOCH2_KEY).unwrap();
     let keyring_record = format!(
-        "home-crypto/v1/keyring\nuser-id: {ALICE}\nversion: 3\nspace: {SPACE} 1 {EPOCH1_KEY}\n\
-         space: {SPACE} 2 {EPOCH2_KEY}\n"
+        "home-crypto/v2/keyring\nuser-id: {ALICE}\nversion: 3\nspace: {SPACE} 1 {EPOCH1_KEY}\n\
+         space: {SPACE} 2 {EPOCH2_KEY}\npin: {ALICE} {}\npin: {BOB} {}\n",
+        alice.verifying_key(),
+        bob.verifying_key()
     );
     let keyring = Keyring::decode(keyring_record.as_bytes()).unwrap();
     let roster = Roster {
@@ -72,16 +84,8 @@ fn fixtures() -> Fixtures {
         epoch: Epoch(1),
         name: "Family photos ☀".into(),
         members: vec![
-            Member {
-                user_id: ALICE,
-                role: Role::Admin,
-                grant_recipient: alice.grant_recipient(),
-            },
-            Member {
-                user_id: BOB,
-                role: Role::Read,
-                grant_recipient: recipient_of(BOB_GRANT_KEY),
-            },
+            Member::of(&alice, Role::Admin),
+            Member::of(&bob, Role::Read),
         ],
     };
     let rotation = Rotation {
@@ -151,10 +155,11 @@ fn fixtures() -> Fixtures {
     Fixtures {
         recovery: RecoveryKey::parse(RECOVERY_KEY).unwrap(),
         grant: Grant {
-            granted_by: ALICE,
+            granted_to: BOB,
             key: epoch1.clone(),
         },
         alice,
+        bob,
         epoch1,
         epoch2,
         keyring,
@@ -177,9 +182,9 @@ fn plaintexts(f: &Fixtures) -> Vec<(&'static str, Vec<u8>)> {
     vec![
         ("user-identity.txt", f.alice.encode().unwrap()),
         ("keyring.txt", f.keyring.encode().unwrap()),
-        ("grant.txt", f.grant.encode().unwrap()),
-        ("roster.txt", f.roster.encode().unwrap()),
-        ("rotation.txt", f.rotation.encode().unwrap()),
+        ("grant.txt", f.grant.encode(&f.alice).unwrap()),
+        ("roster.txt", f.roster.encode(&f.alice).unwrap()),
+        ("rotation.txt", f.rotation.encode(&f.alice).unwrap()),
         (
             "manifest-snapshot.bin",
             f.manifest.encode(SegmentKind::Snapshot).unwrap(),
@@ -195,11 +200,17 @@ fn plaintexts(f: &Fixtures) -> Vec<(&'static str, Vec<u8>)> {
         (
             "fingerprints.txt",
             format!(
-                "epoch1 {} {}\nepoch2 {} {}\n",
+                "epoch1 {} {}\nepoch2 {} {}\nalice {} {} {}\nbob {} {} {}\n",
                 f.epoch1.fingerprint(),
                 f.epoch1.fingerprint().safety_number(),
                 f.epoch2.fingerprint(),
-                f.epoch2.fingerprint().safety_number()
+                f.epoch2.fingerprint().safety_number(),
+                f.alice.verifying_key(),
+                f.alice.fingerprint(),
+                f.alice.fingerprint().safety_number(),
+                f.bob.verifying_key(),
+                f.bob.fingerprint(),
+                f.bob.fingerprint().safety_number()
             )
             .into_bytes(),
         ),
@@ -231,27 +242,23 @@ fn committed_ciphertexts_decrypt_to_the_plaintexts() {
     let keyring = Keyring::open(&read("keyring.age"), &f.alice, 3).unwrap();
     assert_eq!(keyring.encode().unwrap(), read("keyring.txt"));
 
-    let bob = UserKeys::decode(
-        format!(
-            "home-crypto/v1/user-identity\nuser-id: {BOB}\ngrant-identity: {BOB_GRANT_KEY}\n\
-             keyring-identity: {KEYRING_KEY}\nrecovery-recipient: {}\n",
-            recipient_of(RECOVERY_KEY)
-        )
-        .as_bytes(),
-    )
-    .unwrap();
-    let grant = Grant::open(&read("grant.age"), &bob).unwrap();
-    assert_eq!(grant.encode().unwrap(), read("grant.txt"));
+    let alice_key = f.alice.verifying_key();
+    let grant = Grant::open(&read("grant.age"), &f.bob)
+        .unwrap()
+        .verify(&alice_key)
+        .unwrap();
+    assert_eq!(grant.encode(&f.alice).unwrap(), read("grant.txt"));
 
-    assert_eq!(
-        Roster::open(&read("roster.age"), &f.epoch1)
-            .unwrap()
-            .encode()
-            .unwrap(),
-        read("roster.txt")
-    );
-    let rotation = Rotation::open(&read("rotation.age"), &f.epoch1).unwrap();
-    assert_eq!(rotation.encode().unwrap(), read("rotation.txt"));
+    let roster = Roster::open(&read("roster.age"), &f.epoch1)
+        .unwrap()
+        .verify_first(&alice_key)
+        .unwrap();
+    assert_eq!(roster.encode(&f.alice).unwrap(), read("roster.txt"));
+    let rotation = Rotation::open(&read("rotation.age"), &f.epoch1)
+        .unwrap()
+        .verify_against(&roster)
+        .unwrap();
+    assert_eq!(rotation.encode(&f.alice).unwrap(), read("rotation.txt"));
     assert_eq!(
         rotation.to_fingerprint,
         Fingerprint::of(&f.epoch2.recipient())
@@ -298,10 +305,13 @@ fn regenerate() {
     write("keyring.age", &seal_at_version_three(&f.keyring, &f.alice));
     write(
         "grant.age",
-        &f.grant.seal(&recipient_of(BOB_GRANT_KEY)).unwrap(),
+        &f.grant.seal(&f.alice, &f.bob.grant_recipient()).unwrap(),
     );
-    write("roster.age", &f.roster.seal(&f.epoch1).unwrap());
-    write("rotation.age", &f.rotation.seal(&f.epoch1).unwrap());
+    write("roster.age", &f.roster.seal(&f.epoch1, &f.alice).unwrap());
+    write(
+        "rotation.age",
+        &f.rotation.seal(&f.epoch1, &f.alice).unwrap(),
+    );
     let (object, _) = object::encrypt(&f.epoch1, OBJECT, &f.content[..], Vec::new()).unwrap();
     write("object.age", &object);
     write(
@@ -319,4 +329,29 @@ fn seal_at_version_three(keyring: &Keyring, keys: &UserKeys) -> Vec<u8> {
     let sealed = lower.seal(keys).unwrap();
     assert_eq!(lower.version(), 3);
     sealed
+}
+
+#[test]
+fn signed_vectors_refuse_tampering_and_other_keys() {
+    let f = fixtures();
+    let bob_key = f.bob.verifying_key();
+    assert!(
+        Grant::decode(&read("grant.txt"))
+            .unwrap()
+            .verify(&bob_key)
+            .is_err()
+    );
+    let mut tampered = read("roster.txt");
+    let at = tampered.iter().position(|&b| b == b'F').unwrap();
+    tampered[at] ^= 1;
+    assert!(
+        Roster::decode(&tampered)
+            .and_then(|r| r.verify(&f.alice.verifying_key()))
+            .is_err()
+    );
+    let published = read("fingerprints.txt");
+    let published = String::from_utf8(published).unwrap();
+    let alice_line = published.lines().find(|l| l.starts_with("alice ")).unwrap();
+    let key = VerifyingKey::parse(alice_line.split(' ').nth(1).unwrap()).unwrap();
+    assert_eq!(key, f.alice.verifying_key());
 }

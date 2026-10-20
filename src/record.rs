@@ -1,9 +1,12 @@
 //! Canonical line-based text records (format §1.1).
 
 use crate::Error;
+use crate::ids::UserId;
+use crate::sign::{Signature, Signed, SigningKey};
 
 pub(crate) const MAX_RECORD_BYTES: usize = 1 << 20;
-const PREFIX: &str = "home-crypto/v1/";
+const PREFIX: &str = "home-crypto/v2/";
+const SIGNATURE_LINE: &[u8] = b"signature: ";
 
 fn valid_value(value: &str) -> bool {
     !value.is_empty() && !value.chars().any(|c| c.is_control())
@@ -37,6 +40,50 @@ impl Writer {
         }
         Ok(self.out.into_bytes())
     }
+
+    /// Appends `signed-by`, then a `signature` over every byte before the signature line (format §1.2).
+    pub(crate) fn finish_signed(
+        mut self,
+        signer: UserId,
+        key: &SigningKey,
+    ) -> Result<Vec<u8>, Error> {
+        self.field("signed-by", &signer.to_string())?;
+        let signature = key.sign(self.out.as_bytes())?;
+        self.field("signature", &signature.to_string())?;
+        self.finish()
+    }
+}
+
+/// Decodes a signed record: `fields` reads the type's own fields, then `signed-by` and `signature` follow.
+pub(crate) fn decode_signed<'a, T>(
+    bytes: &'a [u8],
+    kind: &str,
+    fields: impl FnOnce(&mut Reader<'a>) -> Result<T, Error>,
+) -> Result<Signed<T>, Error> {
+    if bytes.len() > MAX_RECORD_BYTES {
+        return Err(Error::TooLarge);
+    }
+    let without_newline = bytes
+        .strip_suffix(b"\n")
+        .ok_or(Error::Malformed("record must end with a newline"))?;
+    let split = without_newline
+        .iter()
+        .rposition(|&b| b == b'\n')
+        .map(|i| i.saturating_add(1))
+        .ok_or(Error::Unsigned)?;
+    let (message, last) = (
+        bytes.get(..split).ok_or(Error::Unsigned)?,
+        without_newline.get(split..).ok_or(Error::Unsigned)?,
+    );
+    let signature = last.strip_prefix(SIGNATURE_LINE).ok_or(Error::Unsigned)?;
+    let signature = Signature::parse(
+        std::str::from_utf8(signature).map_err(|_| Error::Malformed("signature"))?,
+    )?;
+    let mut r = Reader::new(message, kind)?;
+    let value = fields(&mut r)?;
+    let signer = UserId::from_hex(r.field("signed-by")?)?;
+    r.finish()?;
+    Ok(Signed::new(value, signer, message, signature))
 }
 
 pub(crate) struct Reader<'a> {
@@ -135,18 +182,18 @@ mod tests {
 
     #[test]
     fn rejects_non_canonical_records() {
-        let ok = b"home-crypto/v1/t\na: 1\nb: x\nb: y\n";
+        let ok = b"home-crypto/v2/t\na: 1\nb: x\nb: y\n";
         let mut r = Reader::new(ok, "t").unwrap();
         assert_eq!(r.field("a").unwrap(), "1");
         assert_eq!(r.repeated("b").unwrap(), ["x", "y"]);
         r.finish().unwrap();
 
         for bad in [
-            &b"home-crypto/v1/t\na: 1"[..],
-            b"home-crypto/v1/t\na: 1\n\n",
-            b"home-crypto/v1/t\na: 1\r\n",
-            b"home-crypto/v1/u\na: 1\n",
-            b"home-crypto/v1/t\na:  1\n\x01",
+            &b"home-crypto/v2/t\na: 1"[..],
+            b"home-crypto/v2/t\na: 1\n\n",
+            b"home-crypto/v2/t\na: 1\r\n",
+            b"home-crypto/v2/u\na: 1\n",
+            b"home-crypto/v2/t\na:  1\n\x01",
         ] {
             let parsed = Reader::new(bad, "t").and_then(|mut r| {
                 r.field("a")?;

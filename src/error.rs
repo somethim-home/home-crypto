@@ -2,6 +2,8 @@
 
 use std::fmt;
 
+use crate::ids::UserId;
+
 #[derive(Debug)]
 pub enum Error {
     Encrypt(age::EncryptError),
@@ -23,6 +25,17 @@ pub enum Error {
     },
     Equivocation,
     Overflow,
+    Signing,
+    /// The signature does not verify against the signer's key.
+    BadSignature,
+    /// A record that must be signed carries no `signature` line.
+    Unsigned,
+    /// The signer is not allowed to make this change (not an admin of the trusted roster, or removed by it).
+    NotAuthorized,
+    /// A verifying key differs from the one pinned for that person.
+    KeyChanged {
+        user: UserId,
+    },
 }
 
 impl fmt::Display for Error {
@@ -49,6 +62,13 @@ impl fmt::Display for Error {
             }
             Self::Equivocation => f.write_str("same operation id with different content"),
             Self::Overflow => f.write_str("counter overflow"),
+            Self::Signing => f.write_str("signing failed"),
+            Self::BadSignature => f.write_str("signature does not verify"),
+            Self::Unsigned => f.write_str("record is not signed"),
+            Self::NotAuthorized => f.write_str("signer is not authorised for this change"),
+            Self::KeyChanged { user } => {
+                write!(f, "verifying key of {user} differs from the pinned key")
+            }
         }
     }
 }

@@ -7,16 +7,27 @@ use age::secrecy::ExposeSecret;
 use crate::identity::UserKeys;
 use crate::ids::{SpaceId, UserId};
 use crate::record::{self, MAX_RECORD_BYTES, parse_u64};
-use crate::space::{Epoch, SpaceKey};
+use crate::sign::{Signed, VerifyingKey};
+use crate::space::{Epoch, Grant, Roster, SpaceKey};
 use crate::{Error, agefile};
 
 const KIND: &str = "keyring";
+
+/// How a verifying key relates to the pins (trust on first use).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Trust {
+    /// The key equals the pinned key.
+    Pinned,
+    /// No key is pinned for this person yet; show their fingerprint before relying on it.
+    FirstUse,
+}
 
 #[derive(Clone, Debug)]
 pub struct Keyring {
     user_id: UserId,
     version: u64,
     keys: BTreeMap<(SpaceId, Epoch), SpaceKey>,
+    pins: BTreeMap<UserId, VerifyingKey>,
 }
 
 impl Keyring {
@@ -25,6 +36,7 @@ impl Keyring {
             user_id,
             version: 0,
             keys: BTreeMap::new(),
+            pins: BTreeMap::new(),
         }
     }
 
@@ -57,11 +69,64 @@ impl Keyring {
         ids
     }
 
+    pub fn pinned(&self, user: UserId) -> Option<&VerifyingKey> {
+        self.pins.get(&user)
+    }
+
+    /// Compares `key` with the pin for `user`; a different key is an error, never silently replaced.
+    pub fn check_pin(&self, user: UserId, key: &VerifyingKey) -> Result<Trust, Error> {
+        match self.pins.get(&user) {
+            None => Ok(Trust::FirstUse),
+            Some(pinned) if pinned == key => Ok(Trust::Pinned),
+            Some(_) => Err(Error::KeyChanged { user }),
+        }
+    }
+
+    /// Pins `key` for `user` on first use; fails if a different key is pinned.
+    pub fn pin(&mut self, user: UserId, key: VerifyingKey) -> Result<Trust, Error> {
+        let trust = self.check_pin(user, &key)?;
+        self.pins.insert(user, key);
+        Ok(trust)
+    }
+
+    /// Pins every member of an accepted roster, or none if any of them conflicts with a pin.
+    pub fn pin_members(&mut self, roster: &Roster) -> Result<(), Error> {
+        for m in &roster.members {
+            self.check_pin(m.user_id, &m.verifying_key)?;
+        }
+        for m in &roster.members {
+            self.pins.insert(m.user_id, m.verifying_key);
+        }
+        Ok(())
+    }
+
+    /// Replaces a pin after the person confirmed the new fingerprint out of band.
+    pub fn replace_pin(&mut self, user: UserId, key: VerifyingKey) {
+        self.pins.insert(user, key);
+    }
+
+    /// Verifies an invitation against the pinned key of its signer, or `published` (the key the server
+    /// lists next to the signer's grant recipient) on first use. A published key that differs from the pin
+    /// is reported as [`Error::KeyChanged`].
+    pub fn verify_invitation(
+        &self,
+        grant: Signed<Grant>,
+        published: &VerifyingKey,
+    ) -> Result<(Grant, Trust), Error> {
+        let trust = self.check_pin(grant.signer(), published)?;
+        Ok((grant.verify(published)?, trust))
+    }
+
     /// Union with a concurrently written keyring; the result is written as the next version.
+    /// Conflicting pins for the same person are refused.
     pub fn merge(&mut self, other: &Keyring) -> Result<(), Error> {
         if other.user_id != self.user_id {
             return Err(Error::WrongUser);
         }
+        for (user, key) in &other.pins {
+            self.check_pin(*user, key)?;
+        }
+        self.pins.extend(other.pins.iter().map(|(u, k)| (*u, *k)));
         for (slot, key) in &other.keys {
             self.keys.entry(*slot).or_insert_with(|| key.clone());
         }
@@ -80,6 +145,9 @@ impl Keyring {
                 key.identity_string().expose_secret()
             );
             w.field("space", &line)?;
+        }
+        for (user, key) in &self.pins {
+            w.field("pin", &format!("{user} {key}"))?;
         }
         w.finish()
     }
@@ -105,11 +173,23 @@ impl Keyring {
             let identity = record::parse_identity(identity)?;
             keys.insert(slot, SpaceKey::from_identity(slot.0, slot.1, identity));
         }
+        let mut pins = BTreeMap::new();
+        let mut previous = None;
+        for line in r.repeated("pin")? {
+            let (user, key) = line.split_once(' ').ok_or(Error::Malformed("pin line"))?;
+            let user = UserId::from_hex(user)?;
+            if previous.is_some_and(|p| p >= user) {
+                return Err(Error::Malformed("pin lines must be sorted and unique"));
+            }
+            previous = Some(user);
+            pins.insert(user, VerifyingKey::parse(key)?);
+        }
         r.finish()?;
         Ok(Self {
             user_id,
             version,
             keys,
+            pins,
         })
     }
 

@@ -5,6 +5,8 @@ use age::x25519;
 
 use crate::ids::UserId;
 use crate::record::{self, MAX_RECORD_BYTES};
+use crate::sign::{SigningKey, VerifyingKey};
+use crate::space::Fingerprint;
 use crate::{Error, agefile};
 
 const KIND: &str = "user-identity";
@@ -48,20 +50,22 @@ pub struct UserKeys {
     user_id: UserId,
     grant: x25519::Identity,
     keyring: x25519::Identity,
+    signing: SigningKey,
     recovery_recipient: x25519::Recipient,
 }
 
 impl UserKeys {
     /// New identities for a person's first device, with the recovery key to print.
-    pub fn generate(user_id: UserId) -> (Self, RecoveryKey) {
+    pub fn generate(user_id: UserId) -> Result<(Self, RecoveryKey), Error> {
         let recovery = x25519::Identity::generate();
         let keys = Self {
             user_id,
             grant: x25519::Identity::generate(),
             keyring: x25519::Identity::generate(),
+            signing: SigningKey::generate()?,
             recovery_recipient: recovery.to_public(),
         };
-        (keys, RecoveryKey(recovery))
+        Ok((keys, RecoveryKey(recovery)))
     }
 
     pub fn user_id(&self) -> UserId {
@@ -71,6 +75,20 @@ impl UserKeys {
     /// The only public recipient of a person; published so others can send grants.
     pub fn grant_recipient(&self) -> x25519::Recipient {
         self.grant.to_public()
+    }
+
+    /// Published next to the grant recipient; verifies this person's grants, rosters and rotations.
+    pub fn verifying_key(&self) -> VerifyingKey {
+        self.signing.verifying_key()
+    }
+
+    /// Covers user id, grant recipient and verifying key; compared in person (format §1).
+    pub fn fingerprint(&self) -> Fingerprint {
+        Fingerprint::of_person(self.user_id, &self.grant_recipient(), &self.verifying_key())
+    }
+
+    pub(crate) fn signing_key(&self) -> &SigningKey {
+        &self.signing
     }
 
     pub(crate) fn grant_identity(&self) -> &x25519::Identity {
@@ -97,6 +115,10 @@ impl UserKeys {
         w.field("user-id", &self.user_id.to_string())?;
         w.field("grant-identity", self.grant.to_string().expose_secret())?;
         w.field("keyring-identity", self.keyring.to_string().expose_secret())?;
+        w.field(
+            "signing-key",
+            self.signing.to_secret_string().expose_secret(),
+        )?;
         w.field("recovery-recipient", &self.recovery_recipient.to_string())?;
         w.finish()
     }
@@ -107,6 +129,7 @@ impl UserKeys {
             user_id: UserId::from_hex(r.field("user-id")?)?,
             grant: record::parse_identity(r.field("grant-identity")?)?,
             keyring: record::parse_identity(r.field("keyring-identity")?)?,
+            signing: SigningKey::parse(r.field("signing-key")?)?,
             recovery_recipient: record::parse_recipient(r.field("recovery-recipient")?)?,
         };
         r.finish()?;

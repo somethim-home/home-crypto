@@ -1,0 +1,9 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc f35eab3a80b8b2a96d821332ec84a3697d14719c6e89beb56c6b4e5b03a80342 # shrinks to actions = [Write { device: 0, path: 0, change: 0, n: 0 }, Write { device: 0, path: 0, change: 0, n: 0 }, Sync { from: 0, to: 1 }, Compact { device: 0 }]
+cc 92dd5613fb26e97256ee063ef6bc629749021fc4b4d7b460100a4bfa0869fb97 # shrinks to actions = [Write { device: 0, path: 2, change: 2, n: 0 }, Sync { from: 0, to: 2 }, Write { device: 0, path: 2, change: 0, n: 0 }, Sync { from: 0, to: 1 }, Write { device: 1, path: 2, change: 0, n: 0 }, Compact { device: 1 }]
+cc be9c0703bb2cbe417ccaaea7da1179d03a78cdd3d97df20277db7309cc27acf5 # shrinks to actions = [Write { device: 0, path: 0, change: 0, n: 0 }, Write { device: 0, path: 0, change: 0, n: 0 }, Write { device: 1, path: 0, change: 0, n: 0 }, Write { device: 0, path: 2, change: 2, n: 0 }, Deliver { to: 2, log: Index(13835058055282163712) }, Write { device: 2, path: 2, change: 0, n: 0 }, Write { device: 2, path: 2, change: 0, n: 0 }, Write { device: 0, path: 0, change: 0, n: 0 }]

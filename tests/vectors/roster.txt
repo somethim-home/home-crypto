@@ -1,0 +1,6 @@
+home-crypto/v1/roster
+space-id: 5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a
+epoch: 1
+name: Family photos ☀
+member: a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1 admin age12as7plqjdzcjlfwj85e6ludsy9gmkngk7d7ev99c8k60nwd4fdgsvjh2je
+member: b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0 read age1pf6wqme62xyfqdaa5k54m6nt2xjrppm0rxql9qp5wh7yhmphsams50dkju

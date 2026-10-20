@@ -1,0 +1,6 @@
+home-crypto/v1/rotation
+space-id: 5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a
+from-epoch: 1
+to-epoch: 2
+to-recipient-sha256: f82ce0f6b51e996319232f3cd59287839d4fd43a88caf96eb85101eccaa302b9
+removed: b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0

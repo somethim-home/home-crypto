@@ -1,4 +1,4 @@
-# Home Files encryption format, version 1
+# Home Files encryption format, version 2
 
 Status: draft, unreviewed. Threat model: `docs/threat-model.md`. Implementation: this crate (`home-crypto`).
 
@@ -9,10 +9,16 @@ and consumed by the Rust `age` crate (pinned `=0.12.1`). Only these age features
 - the scrypt passphrase recipient,
 - the STREAM payload (ChaCha20-Poly1305, 64 KiB chunks), including its seekable decryption.
 
-No other cipher, MAC or KDF is used. Outside age, the format uses SHA-256 for two non-secret values (content
-hashes and recipient fingerprints) and a CSPRNG (`getrandom`) for identifiers. Everything else is *which*
-plaintext is put into *which* age file, encrypted to *which* recipients — that layer is our own design and is
-what needs review.
+No other cipher, MAC or KDF is used. The one primitive outside age is **Ed25519** (RFC 8032, pure Ed25519, no
+pre-hash, no context), through the `ed25519-dalek` crate (pinned `=3.0.0`), for signatures on grants, rosters
+and rotation records (§1.2). It closes what age cannot: age has no sender authentication. Outside age, the
+format also uses SHA-256 for non-secret values (content hashes and fingerprints) and a CSPRNG (`getrandom`) for
+identifiers and signing-key seeds. Everything else is *which* plaintext is put into *which* age file, encrypted
+to *which* recipients and signed by *whom* — that layer is our own design and is what needs review.
+
+Version 2 differs from version 1 only in the text records (§1.1): every person has a signing key, and grants,
+rosters and rotations are signed. Objects, manifest segments and share links are unchanged and keep their
+version-1 identifiers (§8).
 
 Items marked **[own design]** are decisions made for this format, not taken from age. Items marked
 **[open]** are unresolved and listed again at the end.
@@ -27,6 +33,12 @@ Items marked **[own design]** are decisions made for this format, not taken from
 - **Recipient fingerprint.** `SHA-256` of the canonical recipient string (`age1…`, lowercase bech32, ASCII),
   64 lowercase hex characters. For display ("safety number") the first 32 hex characters are shown in 8 groups
   of 4. **[own design]**
+- **Verifying key.** An Ed25519 public key: its 32-byte encoding as 64 lowercase hex characters. Readers refuse
+  keys that do not decode to a curve point and weak (small-order) keys. **[own design: encoding]**
+- **Person fingerprint.** `SHA-256` of the ASCII string
+  `home-crypto/v2/person <user-id> <grant recipient> <verifying key>` (single spaces), shown as a safety number
+  like a recipient fingerprint. It covers both of a person's public keys, so comparing it in person also checks
+  the signing key. **[own design]**
 - **Content hash.** `SHA-256` of a file's plaintext content (without the object prefix of §6). **[own design]**
 - **Integers** in binary encodings are big-endian. Times are signed 64-bit milliseconds since the Unix epoch,
   as reported by the client (untrusted).
@@ -36,7 +48,7 @@ Items marked **[own design]** are decisions made for this format, not taken from
 Small records (identity, keyring, grant, roster, rotation) are UTF-8 text inside the age payload:
 
 ```
-home-crypto/v1/<type>\n
+home-crypto/v2/<type>\n
 <key>: <value>\n
 …
 ```
@@ -54,25 +66,54 @@ Rules, enforced by the parser (anything else is rejected):
 
 Because the encoding is canonical, decoding and re-encoding a valid record gives identical bytes.
 
+### 1.2 Signed records **[own design]**
+
+Grants, rosters and rotation records are *signed records*. After the type's own fields they end with exactly
+two lines:
+
+```
+signed-by: <user-id>\n
+signature: <128 lowercase hex characters>\n
+```
+
+The signature is pure Ed25519 by the signer's signing key over **every byte of the record before the
+`signature` line**: the type line, all fields and the `signed-by` line, each with its `\n`. The type line
+(`home-crypto/v2/<type>`) is the domain separator: a signature over one record type cannot be reused for
+another, and the signing key is used for nothing else. Since the record is canonical and Ed25519 is
+deterministic, the signed bytes and the signature are reproducible (test vectors).
+
+Readers split off the last line first: a record without a final `signature:` line is refused as unsigned
+before any field is used. They then parse the rest with the rules of §1.1, and verify with
+`verify_strict` (refuses non-canonical signatures and small-order keys and `R` values). **Which** key a
+signature is checked against, and whether that signer may make the change, is decided by the acceptance rules
+of each record type (§3); the `signed-by` field only names whose key to look up.
+
 ## 2. Keys per person
 
 | Name | Kind | Who knows the private part | Who knows the recipient |
 | --- | --- | --- | --- |
 | grant identity | X25519 | the person's unlocked devices | **public**: published to the server so others can grant spaces |
 | keyring identity | X25519 | the person's unlocked devices | the person's unlocked devices only (never sent to the server) |
+| signing key | Ed25519 | the person's unlocked devices | **public**: the verifying key is published next to the grant recipient and listed in every roster |
 | recovery identity | X25519 | printed once; held by the person | only inside the person's sealed identity record |
 
-Two separate identities are used because age cannot authenticate the sender: anything encrypted to a public
-recipient can be forged by the server. The keyring is therefore encrypted to a recipient the server never
-learns. **[own design]**
+Two separate X25519 identities are used because age cannot authenticate the sender: anything encrypted to a
+public recipient can be forged by the server. The keyring is therefore encrypted to a recipient the server
+never learns. The signing key authenticates what *is* sent to a public recipient (grants) and lets members
+authenticate each other's rosters and rotations. **[own design]**
+
+The signing key is generated from 32 bytes of `getrandom` output (the RFC 8032 seed) on the person's first
+device. It never changes in version 2; a person who loses both passphrase and recovery key gets a new identity,
+and the people who pinned the old key see a key change (§2.2).
 
 ### 2.1 `user-identity` record
 
 ```
-home-crypto/v1/user-identity
+home-crypto/v2/user-identity
 user-id: <user-id>
 grant-identity: AGE-SECRET-KEY-1…
 keyring-identity: AGE-SECRET-KEY-1…
+signing-key: <Ed25519 seed, 64 lowercase hex characters>
 recovery-recipient: age1…
 ```
 
@@ -91,8 +132,8 @@ the server cannot substitute its own user identity. It can still serve an old pa
 
 Flows:
 
-- **Create** (first device): generate grant, keyring and recovery identities; seal both files; upload them
-  and the grant recipient; print the recovery identity.
+- **Create** (first device): generate grant, keyring and recovery identities and the signing key; seal both
+  files; upload them, the grant recipient and the verifying key; print the recovery identity.
 - **Unlock on a new device**: download one file, decrypt with the passphrase (scrypt identity) or the recovery
   identity; verify `user-id` equals the account's user id.
 - **Change passphrase**: re-seal `identity.passphrase.age`.
@@ -101,16 +142,27 @@ Flows:
 ### 2.2 `keyring` record (`keyring.age`, to the keyring recipient)
 
 ```
-home-crypto/v1/keyring
+home-crypto/v2/keyring
 user-id: <user-id>
 version: <u64>
 space: <space-id> <epoch> AGE-SECRET-KEY-1…        (repeated, sorted by space-id then epoch)
+pin: <user-id> <verifying key>                      (repeated, sorted by user-id)
 ```
 
 The person's list of accepted spaces and every epoch identity of each. `version` increases by one with every
 write; devices remember the highest version seen and refuse lower ones (rollback detection on known devices
-only). Concurrent writers: the client re-reads, merges the `space` lines (union) and writes `version + 1`;
-the server stores with compare-and-swap on the version. **[own design]**
+only). Concurrent writers: the client re-reads, merges the `space` and `pin` lines (union) and writes
+`version + 1`; the server stores with compare-and-swap on the version. **[own design]**
+
+`pin` lines are the person's **trust-on-first-use** record of other people's verifying keys (and their own).
+A key is pinned when the person accepts an invitation from someone (the inviter's key) and when a roster is
+accepted (every member's key). Whenever a key is seen again — published by the server, listed in a roster,
+named by a signed record — it must equal the pin; a different key is refused as a *key change* and never
+replaced silently. Replacing a pin is an explicit action after the person has compared the new person
+fingerprint out of band. Merging two keyrings with different pins for the same person fails the same way.
+Pins live in the keyring rather than on one device so that every device of the person shares them, and
+because the keyring recipient is secret from the server, the server cannot add or change pins.
+**[own design]**
 
 ## 3. Spaces
 
@@ -121,76 +173,121 @@ server from forging objects, manifests and rosters. **[own design]**
 A private space is a space with one member. Nothing in the format distinguishes private from shared spaces
 except the roster.
 
-### 3.1 `roster` record (`roster-<epoch>.age`, to that epoch's space recipient)
+### 3.1 `roster` record (`roster-<epoch>.age`, to that epoch's space recipient, signed)
 
 ```
-home-crypto/v1/roster
+home-crypto/v2/roster
 space-id: <space-id>
 epoch: <epoch>
 name: <display name, 1–256 bytes>
-member: <user-id> <role> age1…<grant recipient>     (repeated, ≥ 1, sorted by user-id)
+member: <user-id> <role> age1…<grant recipient> <verifying key>     (repeated, ≥ 1, sorted by user-id)
+signed-by: <user-id>
+signature: <signature>
 ```
 
-`role` is `admin`, `write` or `read`. Roles are enforced by the server only: every member holds the space
-identity and can therefore technically produce valid files for the space. The server also keeps its own
-membership list for authorisation; that list is visible metadata.
+`role` is `admin`, `write` or `read`. For objects and manifest segments roles are enforced by the server only:
+every member holds the space identity and can therefore technically produce valid files for the space. The
+server also keeps its own membership list for authorisation; that list is visible metadata.
 
-### 3.2 Grants (`grant.age`, to the member's grant recipient)
+For signed records, **roles are enforced by the members** **[own design]**: only grants, rosters and
+rotations signed by an admin are accepted. Each device keeps, per space and epoch, the last roster it accepted
+(the *trusted roster*). A roster is accepted when:
+
+- **first roster of a space** (just after accepting an invitation): it is signed by the inviter, with the key
+  the invitation was verified with (pinned or first use, §3.2), and the roster itself lists the inviter as
+  admin with that same key;
+- **change within an epoch** (members added, roles or name changed): it has the same space and epoch as the
+  trusted roster, its signer is an admin *of the trusted roster*, and the signature verifies with the key the
+  trusted roster lists for them;
+- **roster of a new epoch**: see §3.4.
+
+After a roster is accepted, every member's verifying key is pinned (§2.2); a member whose key differs from an
+existing pin makes the whole roster refused (key change). The person then checks that they are a member;
+if not, the client warns.
+
+### 3.2 Grants (`grant.age`, to the member's grant recipient, signed)
 
 ```
-home-crypto/v1/grant
+home-crypto/v2/grant
 space-id: <space-id>
 epoch: <epoch>
-granted-by: <user-id>
+granted-to: <user-id>
 space-identity: AGE-SECRET-KEY-1…
+signed-by: <user-id>
+signature: <signature>
 ```
 
-A grant delivers one epoch identity to one person. Because the grant recipient is public, **a grant is not
-authenticated**: the server can create one, and `granted-by` is only a claim. Rules **[own design]**:
+A grant delivers one epoch identity to one person, signed by the member who grants it. The grant recipient is
+public, so anyone (including the server) can *encrypt* a grant; the signature is what authenticates it.
+`granted-to` binds the grant to its addressee: readers refuse a grant whose `granted-to` is not their own user
+id, so a member cannot forward a grant they received to someone else as if the signer had sent it. Rules
+**[own design]**:
 
-- A first grant for an unknown space is an *invitation*: it is shown with the claimed inviter and the space
-  fingerprint and is only used after the person accepts it. Accepting copies the identity into the keyring;
-  from then on the keyring, not the grant, is the source of truth.
-- A grant for a new epoch of a space already in the keyring is accepted automatically only if it matches a
-  rotation record (§3.4) that decrypts with an identity already in the keyring. Otherwise it is treated as an
-  invitation.
-- After reading the roster, the client checks that it is a member there; if not, it warns.
-
-**[open]** Signatures (e.g. Ed25519) would authenticate grants and rotations, but are outside "age only".
+- Unsigned grants, and grants whose signature does not verify against the signer's key, are refused.
+- A first grant for an unknown space is an *invitation*. The signer's key is the pinned key if the person has
+  one for `signed-by`; otherwise it is the verifying key the server publishes for that user, used on first
+  use. A published key that differs from a pin is refused as a key change. The invitation is shown with the
+  inviter, whether their key was pinned or is new (first use, with the inviter's person fingerprint to
+  compare), and the space fingerprint, and is used only after the person accepts it. Accepting pins the
+  inviter's key and copies the identity into the keyring; from then on the keyring, not the grant, is the
+  source of truth.
+- A grant for a new epoch of a space already in the keyring is accepted automatically only as part of a
+  verified rotation (§3.4). Otherwise it is treated as an invitation.
+- The first roster is then accepted as in §3.1.
 
 ### 3.3 Add a member
 
-1. An admin client writes a grant for the current epoch to the new member's grant recipient.
-2. It writes a new roster for the current epoch (same epoch, new member line); the server stores rosters with
-   compare-and-swap.
+1. An admin client fetches the new member's published grant recipient and verifying key (checking them against
+   its pins, or pinning them on first use after showing the person fingerprint) and writes a signed grant for
+   the current epoch to that grant recipient.
+2. It writes a new signed roster for the current epoch (same epoch, new member line with the verifying key);
+   the server stores rosters with compare-and-swap. Other members accept it as a change within the epoch
+   (§3.1) and pin the new member's key.
 3. The new member accepts (§3.2). They can read everything in the current epoch and, if older epoch identities
    are granted too, older objects not yet re-encrypted. Clients grant all epochs they hold by default, so a new
    member sees the full history. **[own design]**
 
 ### 3.4 Remove a member (rotation)
 
-1. An admin client generates the identity for epoch `n + 1`.
-2. It writes `rotation-<n+1>.age`, encrypted to the **epoch `n`** space recipient:
+1. An admin client generates the identity for epoch `n + 1`. The admin must be an admin of the epoch-`n`
+   roster and must not remove themselves.
+2. It writes `rotation-<n+1>.age`, encrypted to the **epoch `n`** space recipient and signed:
 
    ```
-   home-crypto/v1/rotation
+   home-crypto/v2/rotation
    space-id: <space-id>
    from-epoch: <n>
    to-epoch: <n+1>
    to-recipient-sha256: <fingerprint of the epoch n+1 recipient>
    removed: <user-id>          (repeated, ≥ 0, sorted)
+   signed-by: <user-id>
+   signature: <signature>
    ```
 
    A rotation without `removed` lines is a plain key refresh.
-3. It writes grants for epoch `n + 1` to every remaining member, and the epoch `n + 1` roster.
+3. It writes signed grants for epoch `n + 1` to every remaining member, and the signed epoch `n + 1` roster
+   (the epoch-`n` members minus the removed ones).
 4. The server removes the member's access. From now on clients encrypt new objects and manifest segments to
    epoch `n + 1` only.
 5. Old objects are re-encrypted in the background by any member client (§6.3).
 
-A remaining member accepts the new grant only if `sha256(recipient(identity)) == to-recipient-sha256` of a
-rotation record it can decrypt with epoch `n`. The removed member can read the rotation record but learns only
-a hash of the new recipient. Residual risk: a removed member colluding with the server can forge a rotation
-record (they hold epoch `n`); clients show the new safety number and the claimed actor for comparison.
+A remaining member accepts the rotation, the grant and the new roster **automatically** only if all of these
+hold **[own design]**:
+
+1. the rotation record decrypts with the epoch-`n` identity, its space and `from-epoch` match, and it is
+   signed by an admin of the member's **trusted epoch-`n` roster**, verified with the key that roster lists;
+   the signer is not in `removed`;
+2. the grant is addressed to the member, signed by **the same signer** with the same key, is for epoch
+   `n + 1` of the space, and `sha256(recipient(identity)) == to-recipient-sha256`;
+3. the epoch-`n + 1` roster decrypts with the new identity, is signed by the same signer with the same key,
+   lists the member, and lists none of the removed users.
+
+The new roster becomes the trusted roster for epoch `n + 1` and its keys are pinned. Anything else is refused;
+a grant for the new epoch that fails these checks may at most be shown as an invitation. The removed member can
+read the rotation record but learns only a hash of the new recipient. Because the removed member holds epoch
+`n` but not an admin's signing key, they (with or without the server) can no longer forge a rotation that
+remaining members accept — unless the removed member was an admin of epoch `n` themselves and signs a
+competing rotation first; see the threat model.
 
 What the removed member already downloaded, or old ciphertext they or the operator kept, stays readable to
 them. The UI states this.
@@ -212,7 +309,9 @@ can read the fragment. Revocation after someone has opened the link cannot be en
 
 Per object and segment: id, ciphertext size, upload/download times, uploader, access pattern. Per space:
 existence, membership, epochs, rosters' and rotations' existence and sizes, manifest segment count and sizes.
-Per person: grant recipient, sealed identity files, keyring size and version count. See the threat model.
+Per person: grant recipient, verifying key, sealed identity files, keyring size and version count. Signatures
+are inside age files, so the server does not see who signed a roster or rotation (it sees who uploaded it).
+See the threat model.
 
 ## 6. File objects
 
@@ -243,7 +342,7 @@ content hash with the manifest entry.
 The plan proposed replacing only the header's recipient stanza and keeping the payload. **The `age` crate's
 public API does not allow this**: `Encryptor` always generates a fresh file key and `Decryptor` never exposes
 the file key or header. Re-wrapping would require re-implementing age header parsing, serialisation and the
-header MAC in this crate on top of `age-core` — code outside the reviewed implementation. Version 1 therefore
+header MAC in this crate on top of `age-core` — code outside the reviewed implementation. The format therefore
 **re-encrypts**: a member client decrypts the object with the old epoch identity and encrypts it again (new
 file key, new payload) to the new epoch recipient, keeping the object id and prefix, verifies the content
 hash, and replaces the object on the server with compare-and-swap. **[open: re-wrap vs re-encrypt]**
@@ -353,25 +452,39 @@ match the space being read.
 | Item | Identifier |
 | --- | --- |
 | Every encrypted file | age header `age-encryption.org/v1` |
-| Text records | first line `home-crypto/v1/<type>`, `<type>` ∈ `user-identity`, `keyring`, `grant`, `roster`, `rotation` |
-| Objects | prefix `HCOB` `0x01` |
-| Manifest segments | `HCMF` `0x01` |
-| Share links | fragment prefix `v1:` |
+| Text records | first line `home-crypto/v2/<type>`, `<type>` ∈ `user-identity`, `keyring`, `grant`, `roster`, `rotation`; the last three are signed (§1.2) |
+| Objects | prefix `HCOB` `0x01` (unchanged since version 1) |
+| Manifest segments | `HCMF` `0x01` (unchanged since version 1) |
+| Share links | fragment prefix `v1:` (unchanged since version 1) |
+| Person fingerprint input | prefix `home-crypto/v2/person` |
 
 Readers reject unknown versions. A future version gets new identifiers; readers keep supporting older ones
-until all data is migrated. The `age` crate is pinned to an exact version; upgrading it requires the test
-vectors (`tests/vectors/`) to keep passing.
+until all data is migrated. The `age` and `ed25519-dalek` crates are pinned to exact versions; upgrading either
+requires the test vectors (`tests/vectors/`) to keep passing.
+
+**Migration from version 1.** Version 1 was never used for real data, so there is no migration: version-2
+readers refuse `home-crypto/v1/…` records (all five record types changed: the identity gained a signing key,
+the keyring gained pins, the roster gained verifying keys, and grants, rosters and rotations are signed).
+Objects, manifest segments and share links did not change, so their identifiers stay at version 1.
 
 ## 9. Open questions
 
 1. **Re-wrap vs re-encrypt** on member removal (§6.3): re-wrapping is not possible with the `age` crate's
-   public API; v1 re-encrypts.
-2. **Authentication of grants and rotations** (§3.2, §3.4): age has no signatures; accept the residual risk
-   with out-of-band fingerprint checks, or add a signature scheme (outside "age only").
+   public API; the format re-encrypts.
+2. **First contact** (§3.2): an invitation from someone whose key is not pinned is verified against the key
+   the server publishes, so the server can still impersonate a person to someone who has never seen their
+   key. Only comparing person fingerprints in person closes this. Would a key-transparency log be worth it?
 3. **Post-quantum**: the Rust `age` crate 0.12.1 has no hybrid ML-KEM + X25519 identity (Go age 1.3 has
    `age1pq…`). Switch space and user identities when the Rust crate supports it?
 4. **home-auth user id format** (§1).
 5. **Case-insensitive file systems** (Windows, macOS): two paths differing only in case are separate entries
    here.
 6. **scrypt cost**: `log_n = 18` to seal, refuse above 22 — confirm for the slowest family phone.
-7. **Member authorship inside a space** is not authenticated; members are trusted with each other.
+7. **Member authorship inside a space**: signed records (grants, rosters, rotations) are authenticated, but
+   objects and manifest segments are not signed; any member can still write any object or manifest operation
+   and claim any device. Signing manifest segments would be the next step.
+8. **Roster rollback within an epoch**: rosters carry no version, so the server can serve an older signed
+   roster of the same epoch (for example one without a newly added member). Devices keep their trusted roster,
+   but a device that has not seen the newer one cannot tell.
+9. **Signing-key rotation**: there is no way to replace a person's signing key while keeping their identity;
+   a new key is always a key change that people must confirm in person.

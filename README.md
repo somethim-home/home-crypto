@@ -6,10 +6,11 @@ End-to-end encryption for Home Files, the family file storage on the home server
 client (desktop, Android, web via wasm, iOS later via uniffi) and by the `home-files` backend, which uses it for
 format validation only and never holds a key.
 
-Everything is built on the [age](https://c2sp.org/age) format through the official `age` crate (pinned
-`=0.12.1`): X25519 recipients, scrypt passphrase recipients and the STREAM payload. There are no new
-cryptographic primitives. The design decides only *which* age file is encrypted to *which* recipients, and that
-layer is what needs the review.
+Encryption is built on the [age](https://c2sp.org/age) format through the official `age` crate (pinned
+`=0.12.1`): X25519 recipients, scrypt passphrase recipients and the STREAM payload. Grants, rosters and rotation
+records are additionally signed with Ed25519 through `ed25519-dalek` (pinned `=3.0.0`), because age cannot
+authenticate a sender. There are no other primitives. The design decides *which* age file is encrypted to
+*which* recipients and signed by *whom*, and that layer is what needs the review.
 
 - `docs/threat-model.md`: assets, actors, what is protected, the metadata the server still sees, the web-client
   caveat, and what happens when keys are lost.
@@ -19,10 +20,12 @@ layer is what needs the review.
 ## What it is
 
 - Person identities: create, seal with a passphrase (scrypt) and with a printed recovery key, unlock either way,
-  change the passphrase, replace the recovery key.
-- Keyring: the person's accepted spaces and every epoch key of each. It has a version counter that detects
-  rollback.
-- Spaces: per-epoch identities, grants (invitations), rosters, and rotation records for removing a member.
+  change the passphrase, replace the recovery key. Each person has an Ed25519 signing key; its verifying key is
+  published next to the grant recipient, and a person fingerprint (safety number) covers both.
+- Keyring: the person's accepted spaces, every epoch key of each, and pinned verifying keys of other people
+  (trust on first use). It has a version counter that detects rollback.
+- Spaces: per-epoch identities, signed grants (invitations), signed rosters, and signed rotation records for
+  removing a member. Members accept membership changes only when an admin of the roster they trust signed them.
 - File objects: streaming encryption and decryption with SHA-256 of the content, seekable range reads, a check
   that the object id matches, and re-encryption to a new epoch.
 - Manifest: a canonical binary encoding plus encrypted segments, with deterministic merge (commutative,
@@ -32,8 +35,9 @@ layer is what needs the review.
 ## What it is not
 
 - Not a server, client or sync engine. Transport, storage, quotas and authentication (home-auth) live elsewhere.
-- Not authenticated between members. age has no signatures, so members of a space trust each other, and grants
-  can be forged by the server (see the threat model).
+- Not authenticated per file. Grants, rosters and rotations are signed, but objects and manifest entries are
+  not: members of a space trust each other with its files. An admin can sign bad membership changes, and a
+  first-contact invitation is only as good as the key the server publishes (see the threat model).
 - Not metadata-private. Object ids, sizes, times, membership and access patterns are visible to the server.
 - Not post-quantum. It uses X25519 only.
 - Not protected against a malicious web bundle. A browser client trusts the server that delivers its code.
@@ -66,6 +70,11 @@ cd fuzz && cargo +nightly fuzz run manifest_decode seeds/manifest_decode
   - `age::scrypt::Recipient::set_work_factor` asserts `0 < log_n < 64`. `ScryptCost` only allows 1–30, so the
     assertion cannot fire.
   - age's STREAM writer and reader assert internal invariants on chunk sizes.
+  - `ed25519-dalek` signing calls an internal `unwrap` on a hashing closure that always returns `Ok`. This crate
+    signs with `try_sign` (the `Signer::sign` convenience method would `expect`) and draws signing-key seeds
+    from `getrandom`, so it does not use `rand_core`'s `OsRng`.
+- `ed25519-dalek` 3 depends on `curve25519-dalek` 5 while age's `x25519-dalek` still uses 4, so both versions are
+  compiled in.
 - The scrypt identity refuses work factors above `ScryptCost::UNLOCK_MAX` (22), so a hostile identity file cannot
   make unlocking run for hours.
 

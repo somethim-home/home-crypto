@@ -46,8 +46,10 @@ Rules, enforced by the parser (anything else is rejected):
 - first line is exactly the type identifier; keys appear in the fixed order given for each type;
 - each line is `key`, `": "`, value, `"\n"`; only keys marked "repeated" may occur more than once, and repeated
   lines are sorted as specified and contain no duplicates;
-- values contain no control characters (U+0000–U+001F, U+007F); there are no blank lines, no `\r`, and the
-  record ends with exactly one `\n`;
+- values are non-empty and contain no Unicode control characters (category Cc: U+0000–U+001F,
+  U+007F–U+009F); there are no blank lines, no `\r`, and the record ends with exactly one `\n`;
+- age identities and recipients must be in their canonical form (identity upper case, recipient lower case);
+  decimal numbers have no sign and no leading zeros;
 - a record is at most 1 MiB.
 
 Because the encoding is canonical, decoding and re-encoding a valid record gives identical bytes.
@@ -270,6 +272,8 @@ segment it has read. **[own design: everything in §7]**
   - `delete`;
   - `dir { mtime }`;
   - `file { mtime, size, object-id, content-sha256 }`.
+- A device that loses its local state (reinstall, wiped storage) uses a new `device-id`, so its `seq`
+  numbers never repeat.
 - `replaces` lists the operations on the same path that the writer's view showed as heads (winner plus
   conflicts) when it wrote. Writing after seeing a conflict therefore resolves it.
 - A **state** is a *frontier* (per device, the highest `seq` such that all operations `1..=seq` of that device
@@ -289,8 +293,8 @@ buggy or malicious member device. Merge is commutative, associative and idempote
 
 ### 7.3 View
 
-For each path, the **heads** are the operations on that path not listed in `replaces` of any operation in the
-state. The **winner** is the head with the greatest `(lamport, device-id, seq)`. If the winner is a `file` or
+For each path, the **heads** are the operations on that path not listed in `replaces` of any operation *on the
+same path* in the state (references to another path are ignored). The **winner** is the head with the greatest `(lamport, device-id, seq)`. If the winner is a `file` or
 `dir`, the path exists with that entry; if it is a `delete`, it does not. Every other head that is a `file`
 is a **conflict** and is shown as a conflict copy next to the path. Directories are implicit for every parent
 of a present path; `dir` entries are needed only for empty folders and folder mtimes. Deleting a folder is a
@@ -303,7 +307,8 @@ file systems]**
 
 `compact(s)` removes operations that can never matter again, and the result is written as a snapshot:
 
-1. `R` = operations in `s` with `seq ≤ frontier` that are listed in `replaces` of some operation in `s`;
+1. `R` = operations in `s` with `seq ≤ frontier` that are listed in `replaces` of some operation on the same
+   path in `s`;
 2. repeat until stable: remove from `R` any operation that lists in `replaces` an id that is neither in `R`
    nor pruned in `s`;
 3. drop `R` from `s`.
@@ -337,7 +342,7 @@ ops-len       u32
     file:     mtime i64 || size u64 || object-id (16) || content-sha256 (32)
 ```
 
-Nothing may follow the last operation. The parser rejects non-canonical input (unsorted lists, duplicates,
+Nothing may follow the last operation. Test vector: `tests/vectors/manifest-snapshot.bin`. The parser rejects non-canonical input (unsorted lists, duplicates,
 zero seq/lamport, bad paths, unknown tags, trailing bytes), so `encode(decode(x)) = x` for every accepted
 `x` (fuzzed). Counts are checked against the remaining input before allocating. A segment is at most 64 MiB
 of plaintext. The `kind` byte is informational; readers merge both kinds the same way. The `space-id` must

@@ -1,0 +1,20 @@
+[package]
+name = "home-crypto"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "End-to-end encryption format for Home Files, built on age"
+license-file = "LICENSE"
+publish = false
+
+[dependencies]
+age = "=0.12.1"
+getrandom = "0.2.17"
+sha2 = "0.10.9"
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+getrandom = { version = "0.2.17", features = ["js"] }
+
+[dev-dependencies]
+proptest = "1.12.0"
+sha2 = "0.10.9"

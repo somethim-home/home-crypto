@@ -349,6 +349,18 @@ impl GuardianWrap {
         Ok(signed)
     }
 
+    /// Verifies a run of wraps a device has not followed: the first must be owner-signed and is checked with
+    /// `owner_key` ([`Signed::<GuardianWrap>::verify_first`]); every later one with `verify_successor`. Returns
+    /// the last. The end of access needs its end record, so a run ending in it is checked with `verify_end`.
+    pub fn verify_chain(wraps: &[&[u8]], owner_key: &VerifyingKey) -> Result<Self, Error> {
+        let (first, rest) = wraps.split_first().ok_or(Error::Malformed("empty chain"))?;
+        let mut trusted = Self::decode(first)?.verify_first(owner_key)?;
+        for next in rest {
+            trusted = Self::decode(next)?.verify_successor(&trusted)?;
+        }
+        Ok(trusted)
+    }
+
     /// The checks every successor must pass, whoever signed it.
     fn follows(&self, next: &Self) -> Result<(), Error> {
         let follows = next.kid.user_id == self.kid.user_id
@@ -379,10 +391,16 @@ impl Signed<GuardianWrap> {
         }
     }
 
-    /// The first wrap a device accepts for a kid: signed by the owner or the kid, with `signer_key` (pinned,
-    /// or the published key on first use), and listing that same key for the signer. See
-    /// [`Keyring::verify_guardian_wrap`] for the pin check.
+    /// The first wrap a device accepts for a kid: signed by the owner with `signer_key` (pinned, or the
+    /// published key on first use), listing that same key for the owner. A kid-signed wrap is accepted on its
+    /// own only once access has ended; an active kid-signed wrap could carry a guardian list nobody but the
+    /// kid's key vouched for, so start from the newest owner-signed wrap instead ([`GuardianWrap::verify_chain`]).
+    /// See [`Keyring::verify_guardian_wrap`] for the pin check.
     pub fn verify_first(self, signer_key: &VerifyingKey) -> Result<GuardianWrap, Error> {
+        let wrap = self.unverified();
+        if wrap.access == Access::Active && self.signer() != wrap.owner {
+            return Err(Error::NotAuthorized);
+        }
         if self.listed_key()? != *signer_key {
             return Err(Error::KeyChanged {
                 user: self.signer(),
@@ -405,8 +423,8 @@ impl Signed<GuardianWrap> {
     ///   the owner) or removed, and the kid's identity may be replaced (rotation); the owner stays a
     ///   guardian with the same key; every guardian that stays keeps the same line;
     /// - signed by the **kid**, with the kid key of `trusted` (the kid's device, or a guardian acting with the
-    ///   kid's identity): the kid's keys stay the same, every guardian of `trusted` stays with the same line,
-    ///   and new guardians are added by the kid or by a guardian of `trusted`;
+    ///   kid's identity): a re-wrap only (passphrase or recovery change): the kid's keys and the guardian
+    ///   lines stay exactly the same. The kid's key never adds or removes a guardian;
     /// - after the end of access, only the kid signs, keys and guardians (none) stay, access stays ended.
     pub fn verify_successor(self, trusted: &GuardianWrap) -> Result<GuardianWrap, Error> {
         let next = self.unverified();
@@ -440,20 +458,8 @@ impl Signed<GuardianWrap> {
                 owner_line.key.verifying_key
             }
             (Access::Active, Access::Active) if signer == trusted.kid.user_id => {
-                if next.kid != trusted.kid
-                    || trusted
-                        .guardians
-                        .iter()
-                        .any(|g| next.guardian(g.key.user_id) != Some(g))
-                {
-                    return Err(Error::NotAuthorized);
-                }
-                let added_ok = next.guardians.iter().all(|g| {
-                    trusted.guardian(g.key.user_id).is_some()
-                        || g.added_by == trusted.kid.user_id
-                        || trusted.guardian(g.added_by).is_some()
-                });
-                if !added_ok {
+                // The kid's key only re-wraps: same keys, the very same guardian lines.
+                if next.kid != trusted.kid || next.guardians != trusted.guardians {
                     return Err(Error::NotAuthorized);
                 }
                 trusted.kid.verifying_key
@@ -909,15 +915,13 @@ pub fn wrap_first(
     )
 }
 
-/// Re-wraps the kid's identity to one more guardian.
-///
-/// `actor` is the owner (signs as owner), the kid (signs with the kid's key), or a current guardian (signs
-/// with the kid's key from `kid`, and is recorded as `added-by`). The caller has checked `guardian`'s keys
-/// against its pins.
+/// Re-wraps the kid's identity to one more guardian. Only the owner adds guardians: `owner` signs and is
+/// recorded as `added-by`; `kid` is the kid's identity, which the owner holds as a guardian. The caller has
+/// checked `guardian`'s keys against its pins.
 pub fn add_guardian(
     trusted: &GuardianWrap,
     kid: &KidIdentity,
-    actor: &UserKeys,
+    owner: &UserKeys,
     guardian: PersonKey,
     now: u64,
 ) -> Result<Rewrap, Error> {
@@ -929,27 +933,23 @@ pub fn add_guardian(
     if trusted.guardian(id).is_some() || id == trusted.kid.user_id {
         return Err(Error::Malformed("already a guardian, or the kid"));
     }
-    let actor_id = actor.user_id();
-    let acting_guardian = trusted
-        .guardian(actor_id)
-        .is_some_and(|g| g.key.verifying_key == actor.verifying_key());
-    let signer = if actor_id == trusted.owner && acting_guardian {
-        actor
-    } else if actor_id == trusted.kid.user_id || acting_guardian {
-        kid.keys()
-    } else {
+    let owner_ok = owner.user_id() == trusted.owner
+        && trusted
+            .guardian(trusted.owner)
+            .is_some_and(|g| g.key.verifying_key == owner.verifying_key());
+    if !owner_ok {
         return Err(Error::NotAuthorized);
-    };
+    }
     let mut guardians = trusted.guardians.clone();
     guardians.push(Guardian {
         key: guardian,
-        added_by: actor_id,
+        added_by: trusted.owner,
         added_at: now,
     });
     guardians.sort_by_key(|g| g.key.user_id);
     sign(
         draft(kid, trusted.owner, Some(trusted), trusted.access, guardians)?,
-        signer,
+        owner,
     )
 }
 
@@ -1433,12 +1433,9 @@ mod tests {
             added_at: 5,
         });
         assert!(matches!(
-            signed(with(added_by_kid.clone()), &f.alice).verify_successor(trusted),
+            signed(with(added_by_kid), &f.alice).verify_successor(trusted),
             Err(Error::NotAuthorized)
         ));
-        signed(with(added_by_kid), kid.keys())
-            .verify_successor(trusted)
-            .unwrap();
 
         let mut backdated = trusted.guardians.clone();
         for g in &mut backdated {
@@ -1462,6 +1459,68 @@ mod tests {
             signed(with(new_owner_key), &other).verify_successor(trusted),
             Err(Error::BadSignature | Error::NotAuthorized)
         ));
+    }
+
+    #[test]
+    fn a_kid_signed_wrap_adding_a_guardian_is_refused_by_every_follower() {
+        let f = fixture();
+        let trusted = &f.setup.wrap.state;
+        let kid = &f.setup.kid;
+        let dave = PersonKey::of(&person(0xd0));
+        // Whoever holds the kid's key (the kid, or a guardian acting as the kid) tries to add Dave.
+        let mut guardians = trusted.guardians.clone();
+        for added_by in [kid.keys.user_id(), f.bob.user_id(), f.alice.user_id()] {
+            guardians.retain(|g| g.key.user_id != dave.user_id);
+            guardians.push(Guardian {
+                key: dave.clone(),
+                added_by,
+                added_at: 5,
+            });
+            guardians.sort_by_key(|g| g.key.user_id);
+            let d = draft(
+                kid,
+                trusted.owner,
+                Some(trusted),
+                Access::Active,
+                guardians.clone(),
+            )
+            .unwrap();
+            let bytes = sign(d, kid.keys()).unwrap().wrap;
+            // A follower holding the trusted wrap (owner, Bob, the kid's other devices, the server)...
+            assert!(matches!(
+                GuardianWrap::decode(&bytes)
+                    .unwrap()
+                    .verify_successor(trusted),
+                Err(Error::NotAuthorized)
+            ));
+            // ...a follower that sees it first, with the kid's pinned or published key...
+            let ring = Keyring::new(UserId([0xe0; 16]));
+            assert!(matches!(
+                ring.verify_guardian_wrap(
+                    GuardianWrap::decode(&bytes).unwrap(),
+                    &kid.keys.verifying_key()
+                ),
+                Err(Error::NotAuthorized)
+            ));
+            // ...and one walking the chain from the owner-signed wrap.
+            assert!(matches!(
+                GuardianWrap::verify_chain(&[&f.setup.wrap.wrap, &bytes], &f.alice.verifying_key()),
+                Err(Error::NotAuthorized)
+            ));
+        }
+        // The API refuses too: only the owner adds.
+        for actor in [kid.keys(), &f.bob] {
+            assert!(matches!(
+                add_guardian(trusted, kid, actor, dave.clone(), 5),
+                Err(Error::NotAuthorized)
+            ));
+        }
+        let by_owner = add_guardian(trusted, kid, &f.alice, dave, 5).unwrap();
+        GuardianWrap::verify_chain(
+            &[&f.setup.wrap.wrap, &by_owner.wrap],
+            &f.alice.verifying_key(),
+        )
+        .unwrap();
     }
 
     #[test]

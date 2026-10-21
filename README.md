@@ -34,7 +34,7 @@ authenticate a sender. There are no other primitives. The design decides *which*
 - Guardian access for kids (module `guardian`, format §9): a kid's identity is wrapped to the kid's passphrase
   key, the kid's recovery key and every guardian (the owner always, plus the parents the owner adds), in a
   signed, hash-chained wrap. A guardian unlocks the kid with their own key and reads everything the kid can.
-  Adding a guardian re-wraps; removing one rotates the kid's identity, moves every space to the new keys and
+  Only the owner adds a guardian (the kid's key only re-wraps); removing one rotates the kid's identity, moves every space to the new keys and
   re-keys the spaces the removed guardian could read only through the kid; the kid ends guardian access with a
   new identity only they know and a signed end record.
 

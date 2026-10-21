@@ -393,67 +393,72 @@ fn forged_unsigned_or_server_edited_wraps_are_rejected() {
 }
 
 #[test]
-fn the_kid_and_current_guardians_can_add_guardians() {
+fn only_the_owner_adds_guardians() {
     let h = home();
     let trusted = h.setup.wrap.state.clone();
     let dave = PersonKey::of(&h.dave);
-
-    // Bob (a guardian, not the owner) adds Dave: signed with Carol's key, recorded as added by Bob.
     let carol = guardian::unlock_as_guardian(&trusted, &h.bob).unwrap();
-    let by_bob = guardian::add_guardian(&trusted, &carol, &h.bob, dave.clone(), NOW + 1).unwrap();
-    let signed = GuardianWrap::decode(&by_bob.wrap).unwrap();
-    assert_eq!(signed.signer(), KID);
-    let next = signed.verify_successor(&trusted).unwrap();
-    assert_eq!(next, by_bob.state);
-    let line = next.guardian(h.dave.user_id()).unwrap();
-    assert_eq!((line.added_by, line.added_at), (h.bob.user_id(), NOW + 1));
-    assert_eq!(next.previous(), Some(trusted.digest()));
 
-    // Dave sees Carol's wrap for the first time, signed by Carol's published key.
+    // Neither a guardian nor the kid can add anyone, even holding the kid's identity.
+    for actor in [&h.bob, carol.keys(), &h.dave] {
+        assert!(matches!(
+            guardian::add_guardian(&trusted, &carol, actor, dave.clone(), NOW),
+            Err(Error::NotAuthorized)
+        ));
+    }
+    let fake_alice = UserKeys::generate(h.alice.user_id()).unwrap().0;
+    assert!(matches!(
+        guardian::add_guardian(&trusted, &carol, &fake_alice, dave.clone(), NOW),
+        Err(Error::NotAuthorized)
+    ));
+
+    // The owner adds Dave, recorded as added by the owner.
+    let by_owner =
+        guardian::add_guardian(&trusted, &carol, &h.alice, dave.clone(), NOW + 1).unwrap();
+    let signed = GuardianWrap::decode(&by_owner.wrap).unwrap();
+    assert_eq!(signed.signer(), h.alice.user_id());
+    let next = signed.verify_successor(&trusted).unwrap();
+    assert_eq!(next, by_owner.state);
+    let line = next.guardian(h.dave.user_id()).unwrap();
+    assert_eq!((line.added_by, line.added_at), (h.alice.user_id(), NOW + 1));
+    assert_eq!(next.previous(), Some(trusted.digest()));
+    assert!(matches!(
+        guardian::add_guardian(&next, &carol, &h.alice, dave, NOW),
+        Err(Error::Malformed(_))
+    ));
+
+    // Dave sees the wrap for the first time, signed by Alice's published key.
     let mut dave_ring = Keyring::new(h.dave.user_id());
     let (seen, trust) = dave_ring
         .verify_guardian_wrap(
-            GuardianWrap::decode(&by_bob.wrap).unwrap(),
-            &carol.keys().verifying_key(),
+            GuardianWrap::decode(&by_owner.wrap).unwrap(),
+            &h.alice.verifying_key(),
         )
         .unwrap();
     assert_eq!(trust, Trust::FirstUse);
     dave_ring.pin_guardian_wrap(&seen).unwrap();
-    assert!(guardian::unlock_as_guardian(&seen, &h.dave).is_ok());
-
-    // The kid's own device adds someone too; the owner adds someone as the owner.
-    let erin = person(0xe1);
-    let by_kid =
-        guardian::add_guardian(&next, &carol, carol.keys(), PersonKey::of(&erin), NOW).unwrap();
-    let next2 = GuardianWrap::decode(&by_kid.wrap)
-        .unwrap()
-        .verify_successor(&next)
-        .unwrap();
-    assert_eq!(next2.guardian(erin.user_id()).unwrap().added_by, KID);
-    let fred = person(0xf0);
-    let by_owner =
-        guardian::add_guardian(&next2, &carol, &h.alice, PersonKey::of(&fred), NOW).unwrap();
-    let signed = GuardianWrap::decode(&by_owner.wrap).unwrap();
-    assert_eq!(signed.signer(), h.alice.user_id());
-    let next3 = signed.verify_successor(&next2).unwrap();
-    assert_eq!(next3.guardians().len(), 5);
-    assert!(matches!(
-        guardian::add_guardian(&next3, &carol, &h.alice, PersonKey::of(&fred), NOW),
-        Err(Error::Malformed(_))
-    ));
-
-    // Every guardian's key opens the latest wrap; the kid's passphrase still does.
-    for g in [&h.alice, &h.bob, &h.dave, &erin, &fred] {
-        guardian::unlock_as_guardian(&next3, g).unwrap();
+    for g in [&h.alice, &h.bob, &h.dave] {
+        guardian::unlock_as_guardian(&seen, g).unwrap();
     }
-    KidIdentity::unlock_with_passphrase(
-        &by_owner.wrap,
-        &h.passphrase_key,
-        pass("carol's passphrase"),
-        cheap(),
-        KID,
+
+    // After a kid-signed re-wrap, a newcomer does not take that wrap on its own; it walks the chain from the
+    // newest owner-signed wrap.
+    let change = guardian::change_passphrase(&next, &carol, pass("new"), cheap()).unwrap();
+    let erin = Keyring::new(UserId([0xe1; 16]));
+    assert!(matches!(
+        erin.verify_guardian_wrap(
+            GuardianWrap::decode(&change.wrap.wrap).unwrap(),
+            &carol.keys().verifying_key()
+        ),
+        Err(Error::NotAuthorized)
+    ));
+    let latest = GuardianWrap::verify_chain(
+        &[&by_owner.wrap, &change.wrap.wrap],
+        &h.alice.verifying_key(),
     )
     .unwrap();
+    assert_eq!(latest, change.wrap.state);
+    assert!(GuardianWrap::verify_chain(&[&change.wrap.wrap], &h.alice.verifying_key()).is_err());
 }
 
 #[test]

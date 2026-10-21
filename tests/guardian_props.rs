@@ -31,6 +31,11 @@ enum Op {
     KidChangesPassphrase,
 }
 
+enum Kind {
+    KidOrGuardianAdds,
+    Other,
+}
+
 fn op() -> impl Strategy<Value = Op> {
     prop_oneof![
         (0usize..5).prop_map(Op::OwnerAdds),
@@ -86,6 +91,10 @@ proptest! {
         for (step, op) in ops.into_iter().enumerate() {
             let trusted = chain.last().unwrap().1.clone();
             let now = step as u64 + 2;
+            let op_kind = match op {
+                Op::KidAdds(_) | Op::GuardianAdds { .. } => Kind::KidOrGuardianAdds,
+                _ => Kind::Other,
+            };
             let result = match op {
                 Op::OwnerAdds(i) => guardian::add_guardian(&trusted, &kid, &owner, PersonKey::of(&pool[i]), now),
                 Op::KidAdds(i) => guardian::add_guardian(&trusted, &kid, kid.keys(), PersonKey::of(&pool[i]), now),
@@ -109,10 +118,12 @@ proptest! {
                     })
                 }
             };
+            let refused_by_rule = matches!(op_kind, Kind::KidOrGuardianAdds);
             let Ok(rewrap) = result else {
-                // Refused operations: adding someone twice, a non-guardian adding, removing a non-guardian.
+                // Refused: adding someone twice, removing a non-guardian, and any addition not by the owner.
                 continue;
             };
+            prop_assert!(!refused_by_rule, "only the owner may add a guardian");
             let next = GuardianWrap::decode(&rewrap.wrap).unwrap().verify_successor(&trusted).unwrap();
             prop_assert_eq!(&next, &rewrap.state);
             follower.follow_guardian_wrap(&trusted, &next).unwrap();

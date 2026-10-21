@@ -552,7 +552,8 @@ signature: <signature>
   wrap record (including its signature line), `none` exactly when `epoch` is 1. Together they chain the wraps.
 - **Signers**: the owner (only while `active`) or the kid. The record lists the key for either: the owner's
   `guardian` line or the `kid` line. Any other `signed-by` is refused when parsing. "The kid" means the kid's
-  key, held by the kid's devices *and by every guardian* (they hold the identity).
+  key, held by the kid's devices *and by every guardian* (they hold the identity); it can only re-wrap with
+  the guardian list unchanged (§9.4).
 
 The record is not encrypted: guardians, the server (for validation) and anyone following the chain read it.
 It shows the server who the guardians are and the kid's public keys, which the server knows anyway.
@@ -562,20 +563,23 @@ It shows the server who the guardians are and the kid's public keys, which the s
 Each device that follows a kid (the kid's devices, every guardian, optionally the server) keeps the last wrap
 it accepted, the *trusted wrap*, and accepts:
 
-- **A first wrap** (setup, or a device that never saw this kid): signed by the owner or the kid, verified with
-  the signer's **pinned** key, or on first use the key the server publishes for them (shown with their person
-  fingerprint, like an invitation, §3.2), and the record must list that same key for the signer. Afterwards
-  the kid's key and every guardian's key are pinned (§2.2); a conflict with a pin refuses the whole wrap.
+- **A first wrap** (setup, or a device that never saw this kid): signed by the **owner**, verified with the
+  owner's **pinned** key, or on first use the key the server publishes for them (shown with their person
+  fingerprint, like an invitation, §3.2), and the record must list that same key for the owner. A kid-signed
+  wrap is not accepted as a first wrap while access is active (its guardian list would rest on the kid's key
+  alone): the device fetches the chain back to the newest owner-signed wrap, accepts that one, and applies the
+  successor rules forward. A kid-signed `ended` wrap may be accepted on its own (it lists no guardians).
+  Afterwards the kid's key and every guardian's key are pinned (§2.2); a conflict with a pin refuses the whole
+  wrap.
 - **A successor** of the trusted wrap, for anything but the end of access, when all of these hold:
   1. same kid and owner, `epoch` one higher, `previous-sha256` equal to the hash of the trusted wrap;
   2. if signed by the **owner**, verified with the key the trusted wrap lists for the owner: the owner stays a
      guardian with an unchanged line; every guardian that stays keeps its line unchanged; new guardians are
      `added-by` the owner; guardians may be removed; the `kid` keys may change (identity rotation, §9.5);
-  3. if signed by the **kid**, verified with the kid key of the trusted wrap: the `kid` line is unchanged;
-     every guardian of the trusted wrap stays with an unchanged line; new guardians are `added-by` the kid or a
-     guardian of the trusted wrap (a guardian adding someone signs with the kid's key and is recorded as
-     `added-by`). The kid's key can therefore add guardians and re-wrap, but never remove one or replace the
-     identity;
+  3. if signed by the **kid**, verified with the kid key of the trusted wrap: a re-wrap only (passphrase or
+     recovery change). The `kid` line and the guardian lines are exactly those of the trusted wrap. The kid's
+     key — held by the kid's devices and by every guardian — never adds or removes a guardian and never
+     replaces the identity;
   4. after the end of access: only the kid signs, the `kid` line stays, access stays `ended`.
 - **The end of access**: §9.7.
 
@@ -591,9 +595,9 @@ Operations (all upload a new wrap with compare-and-swap):
   passphrase identity sealed with the passphrase the kid types (§9.1); wrap to the passphrase key, the
   recovery recipient, the owner and the parents; sign as the owner (epoch 1). The kid's keyring starts with pins
   for the kid, the owner and the parents.
-- **Add a guardian**: whoever holds the kid's identity — the owner (signs as owner), the kid's device or a
-  current guardian (sign with the kid's key) — re-wraps to one more grant recipient, after checking the new
-  guardian's keys against their pins.
+- **Add a guardian**: **the owner only** (owner decision, 2026-10-21). The owner, holding the kid's identity as
+  a guardian, re-wraps to one more grant recipient after checking the new guardian's keys against their pins,
+  signs as the owner and is recorded as `added-by`. Neither the kid nor another guardian can add anyone.
 - **Change the passphrase / the recovery key** (kid's device): a new passphrase identity, or a new recovery
   recipient inside the identity; re-wrap signed by the kid.
 
@@ -723,9 +727,8 @@ record and its successor rules with this crate, since all keys involved are publ
     with the server, can make such a device unlock an older identity they know. Should a removal force a new
     passphrase key at the kid's next unlock, and should wraps be anchored to the owner's key in the
     passphrase-key record?
-11. **Who may add guardians** (§9.4): the kid's key may add guardians, so the kid, or any guardian, can add a
-    guardian without the owner. The owner sees `added-by` and can remove them, but cannot prevent it. Should
-    additions require the owner's signature?
+11. **Who may add guardians** (§9.4): decided — only the owner. A wrap signed with the kid's key may only
+    re-wrap with the guardian list unchanged.
 12. **Racing an identity rotation** (§9.5): spaces where the kid is the admin are re-keyed with the kid's old
     key, which the removed guardian also holds; they can race the rotation as a removed admin can (threat
     model). The owner signing every kid space as a second admin would close it.

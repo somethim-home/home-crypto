@@ -9,7 +9,7 @@ use crate::sign::{SigningKey, VerifyingKey};
 use crate::space::Fingerprint;
 use crate::{Error, agefile};
 
-const KIND: &str = "user-identity";
+const KIND: &str = "v2/user-identity";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ScryptCost(u8);
@@ -42,6 +42,10 @@ impl RecoveryKey {
 
     pub fn to_secret_string(&self) -> SecretString {
         self.0.to_string()
+    }
+
+    pub(crate) fn identity(&self) -> &x25519::Identity {
+        &self.0
     }
 }
 
@@ -103,6 +107,24 @@ impl UserKeys {
         self.keyring.to_public()
     }
 
+    /// New grant, keyring and signing keys for the same person, keeping the recovery recipient.
+    ///
+    /// Used when a kid's identity is rotated (format §9): whoever held the old identity learns nothing about
+    /// the new one.
+    pub(crate) fn rotated(&self) -> Result<Self, Error> {
+        Ok(Self {
+            user_id: self.user_id,
+            grant: x25519::Identity::generate(),
+            keyring: x25519::Identity::generate(),
+            signing: SigningKey::generate()?,
+            recovery_recipient: self.recovery_recipient.clone(),
+        })
+    }
+
+    pub(crate) fn recovery_recipient(&self) -> &x25519::Recipient {
+        &self.recovery_recipient
+    }
+
     /// Replaces the recovery identity; both sealed files must be written again afterwards.
     pub fn new_recovery_key(&mut self) -> RecoveryKey {
         let recovery = x25519::Identity::generate();
@@ -112,6 +134,12 @@ impl UserKeys {
 
     pub fn encode(&self) -> Result<Vec<u8>, Error> {
         let mut w = record::Writer::new(KIND);
+        self.write_fields(&mut w)?;
+        w.finish()
+    }
+
+    /// The fields of `user-identity`, shared with the `wrapped-identity` record (format §9.2).
+    pub(crate) fn write_fields(&self, w: &mut record::Writer) -> Result<(), Error> {
         w.field("user-id", &self.user_id.to_string())?;
         w.field("grant-identity", self.grant.to_string().expose_secret())?;
         w.field("keyring-identity", self.keyring.to_string().expose_secret())?;
@@ -119,21 +147,24 @@ impl UserKeys {
             "signing-key",
             self.signing.to_secret_string().expose_secret(),
         )?;
-        w.field("recovery-recipient", &self.recovery_recipient.to_string())?;
-        w.finish()
+        w.field("recovery-recipient", &self.recovery_recipient.to_string())
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
         let mut r = record::Reader::new(bytes, KIND)?;
-        let keys = Self {
+        let keys = Self::read_fields(&mut r)?;
+        r.finish()?;
+        Ok(keys)
+    }
+
+    pub(crate) fn read_fields(r: &mut record::Reader<'_>) -> Result<Self, Error> {
+        Ok(Self {
             user_id: UserId::from_hex(r.field("user-id")?)?,
             grant: record::parse_identity(r.field("grant-identity")?)?,
             keyring: record::parse_identity(r.field("keyring-identity")?)?,
             signing: SigningKey::parse(r.field("signing-key")?)?,
             recovery_recipient: record::parse_recipient(r.field("recovery-recipient")?)?,
-        };
-        r.finish()?;
-        Ok(keys)
+        })
     }
 
     /// `identity.passphrase.age`.
@@ -161,7 +192,7 @@ impl UserKeys {
         let mut identity = age::scrypt::Identity::new(passphrase);
         identity.set_max_work_factor(max_cost.log_n());
         let identities: [&dyn age::Identity; 1] = [&identity];
-        let plaintext = agefile::decrypt(identities.into_iter(), sealed, MAX_RECORD_BYTES)?;
+        let plaintext = agefile::decrypt_secret(identities.into_iter(), sealed, MAX_RECORD_BYTES)?;
         Self::checked(&plaintext, expected)
     }
 
@@ -171,7 +202,7 @@ impl UserKeys {
         expected: UserId,
     ) -> Result<Self, Error> {
         let identities: [&dyn age::Identity; 1] = [&recovery.0];
-        let plaintext = agefile::decrypt(identities.into_iter(), sealed, MAX_RECORD_BYTES)?;
+        let plaintext = agefile::decrypt_secret(identities.into_iter(), sealed, MAX_RECORD_BYTES)?;
         Self::checked(&plaintext, expected)
     }
 

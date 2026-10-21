@@ -19,3 +19,10 @@ path = "fuzz_targets/manifest_decode.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "guardian_decode"
+path = "fuzz_targets/guardian_decode.rs"
+test = false
+doc = false
+bench = false

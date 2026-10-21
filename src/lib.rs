@@ -20,6 +20,7 @@
 mod agefile;
 mod binary;
 pub mod error;
+pub mod guardian;
 pub mod identity;
 pub mod ids;
 pub mod keyring;

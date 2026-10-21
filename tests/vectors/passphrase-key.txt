@@ -1,0 +1,4 @@
+home-crypto/v3/passphrase-key
+user-id: c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1
+passphrase-identity: AGE-SECRET-KEY-1KXW8WA55XD2CHT7KTV047WS3LPHQ6RN2PZW8A9VPCT0ARZZZF6MSWCGEFA
+guardian-access: active

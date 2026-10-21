@@ -155,7 +155,7 @@ pub struct Grant {
 }
 
 impl Grant {
-    const KIND: &str = "grant";
+    const KIND: &str = "v2/grant";
 
     pub fn encode(&self, signer: &UserKeys) -> Result<Vec<u8>, Error> {
         let mut w = record::Writer::new(Self::KIND);
@@ -258,7 +258,7 @@ pub struct Roster {
 }
 
 impl Roster {
-    const KIND: &str = "roster";
+    const KIND: &str = "v2/roster";
     const MAX_NAME: usize = 256;
 
     pub fn encode(&self, signer: &UserKeys) -> Result<Vec<u8>, Error> {
@@ -346,6 +346,18 @@ impl Roster {
         Ok(roster)
     }
 
+    /// The same roster with `member` replacing the line of the same person, who must already be listed.
+    pub fn with_member(&self, member: Member) -> Result<Self, Error> {
+        let mut next = self.clone();
+        let slot = next
+            .members
+            .iter_mut()
+            .find(|m| m.user_id == member.user_id)
+            .ok_or(Error::WrongUser)?;
+        *slot = member;
+        Ok(next)
+    }
+
     pub fn member(&self, user_id: UserId) -> Option<&Member> {
         self.members.iter().find(|m| m.user_id == user_id)
     }
@@ -392,7 +404,7 @@ pub struct Rotation {
 }
 
 impl Rotation {
-    const KIND: &str = "rotation";
+    const KIND: &str = "v2/rotation";
 
     pub fn encode(&self, signer: &UserKeys) -> Result<Vec<u8>, Error> {
         self.validate()?;
@@ -496,6 +508,19 @@ pub fn rotate(
     removed: &[UserId],
     actor: &UserKeys,
 ) -> Result<RotationOutput, Error> {
+    rotate_updating(previous, roster, removed, &[], actor)
+}
+
+/// [`rotate`], with `updated` replacing the member lines of the same people in the new roster, so their
+/// grants go to their new grant recipients. Used when a kid's identity is rotated (format §9.5): the kid
+/// stays a member with new keys. Each updated person must be in `roster` and not removed.
+pub fn rotate_updating(
+    previous: &SpaceKey,
+    roster: &Roster,
+    removed: &[UserId],
+    updated: &[Member],
+    actor: &UserKeys,
+) -> Result<RotationOutput, Error> {
     if roster.space_id != previous.space_id || roster.epoch != previous.epoch {
         return Err(Error::WrongSpace);
     }
@@ -523,9 +548,21 @@ pub fn rotate(
             .members
             .iter()
             .filter(|m| removed.binary_search(&m.user_id).is_err())
-            .cloned()
+            .map(|m| {
+                updated
+                    .iter()
+                    .find(|u| u.user_id == m.user_id)
+                    .unwrap_or(m)
+                    .clone()
+            })
             .collect(),
     };
+    if updated
+        .iter()
+        .any(|u| removed.binary_search(&u.user_id).is_ok() || roster.member(u.user_id).is_none())
+    {
+        return Err(Error::WrongUser);
+    }
     let grants = next_roster
         .members
         .iter()

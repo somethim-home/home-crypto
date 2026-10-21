@@ -1,4 +1,4 @@
-//! Ed25519 signatures on grants, rosters and rotations (format §1.2).
+//! Ed25519 signatures on grants, rosters, rotations and guardian records (format §1.2).
 
 use std::fmt;
 

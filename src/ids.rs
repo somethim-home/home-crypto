@@ -43,6 +43,20 @@ pub(crate) fn from_hex<const N: usize>(text: &str) -> Result<[u8; N], Error> {
     Ok(out)
 }
 
+/// Lowercase hex of any even length up to `2 * max_bytes` characters.
+pub(crate) fn from_hex_vec(text: &str, max_bytes: usize) -> Result<Vec<u8>, Error> {
+    if text.len() % 2 != 0 || text.len() / 2 > max_bytes {
+        return Err(Error::Malformed("hex length"));
+    }
+    text.as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let pair = std::str::from_utf8(pair).map_err(|_| Error::Malformed("hex digit"))?;
+            from_hex::<1>(pair).map(|[byte]| byte)
+        })
+        .collect()
+}
+
 macro_rules! id_type {
     ($(#[$doc:meta])* $name:ident) => {
         $(#[$doc])*
@@ -94,5 +108,10 @@ mod tests {
         assert_eq!(SpaceId::from_hex(&id.to_string()).unwrap(), id);
         assert!(SpaceId::from_hex(&"AB".repeat(16)).is_err());
         assert!(SpaceId::from_hex("ab").is_err());
+        assert_eq!(from_hex_vec("00ff10", 3).unwrap(), [0, 0xff, 0x10]);
+        assert!(from_hex_vec("00ff10", 2).is_err());
+        assert!(from_hex_vec("0", 2).is_err());
+        assert!(from_hex_vec("0F", 2).is_err());
+        assert!(from_hex_vec("é0", 2).is_err());
     }
 }

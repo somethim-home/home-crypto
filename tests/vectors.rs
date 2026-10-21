@@ -2,6 +2,9 @@
 
 use std::path::PathBuf;
 
+use home_crypto::guardian::{
+    self, Access, GuardianEnd, GuardianWrap, KidIdentity, PassphraseKey, PersonKey,
+};
 use home_crypto::identity::{RecoveryKey, ScryptCost, UserKeys};
 use home_crypto::ids::{DeviceId, ObjectId, SpaceId, UserId};
 use home_crypto::keyring::Keyring;
@@ -354,4 +357,183 @@ fn signed_vectors_refuse_tampering_and_other_keys() {
     let alice_line = published.lines().find(|l| l.starts_with("alice ")).unwrap();
     let key = VerifyingKey::parse(alice_line.split(' ').nth(1).unwrap()).unwrap();
     assert_eq!(key, f.alice.verifying_key());
+}
+
+// Guardian access (format §9). The kid's identity and passphrase key are fixed; the wraps embed age
+// ciphertext and are therefore committed once and checked by verification and decryption.
+
+const KID: UserId = UserId([0xc1; 16]);
+const KID_GRANT_KEY: &str =
+    "AGE-SECRET-KEY-1X99H9H6PTK4V8P0UUWSHGSDYMCHQYYY23E4AKADVSYZRGQ056KTS7XTWDC";
+const KID_KEYRING_KEY: &str =
+    "AGE-SECRET-KEY-1GHZ73252EH9978LCAG4SGFM3KJXW5YU2MMUDREUV7AH53KXVTAVSC9J2NY";
+const KID_RECOVERY_KEY: &str =
+    "AGE-SECRET-KEY-1273WJ64JLHD44NDEFUXPFM2LLC4RJTG49LXEAWR3ZCRJRPZKL6TSN753JX";
+const KID_PASSPHRASE_KEY: &str =
+    "AGE-SECRET-KEY-1KXW8WA55XD2CHT7KTV047WS3LPHQ6RN2PZW8A9VPCT0ARZZZF6MSWCGEFA";
+const KID_SIGNING_KEY: &str = "d96da2156ef1476f913fb8c52d957163a033f175ec9925d3309fbf6c47354082";
+const KID_PASSPHRASE: &str = "purple monkey dishwasher";
+const WRAP_TIME: u64 = 1_760_000_000_000;
+const END_TIME: u64 = 1_900_000_000_000;
+
+fn kid_identity_text() -> String {
+    format!(
+        "home-crypto/v3/wrapped-identity\nuser-id: {KID}\ngrant-identity: {KID_GRANT_KEY}\n\
+         keyring-identity: {KID_KEYRING_KEY}\nsigning-key: {KID_SIGNING_KEY}\n\
+         recovery-recipient: {}\npassphrase-recipient: {}\n",
+        recipient_of(KID_RECOVERY_KEY),
+        recipient_of(KID_PASSPHRASE_KEY)
+    )
+}
+
+fn passphrase_key_text() -> String {
+    format!(
+        "home-crypto/v3/passphrase-key\nuser-id: {KID}\npassphrase-identity: {KID_PASSPHRASE_KEY}\n\
+         guardian-access: active\n"
+    )
+}
+
+#[test]
+fn guardian_plaintexts_match_byte_for_byte() {
+    let kid = KidIdentity::decode(kid_identity_text().as_bytes()).unwrap();
+    assert_eq!(
+        kid.encode().unwrap().as_slice(),
+        read("wrapped-identity.txt")
+    );
+    let key = PassphraseKey::decode(passphrase_key_text().as_bytes()).unwrap();
+    assert_eq!(key.encode().unwrap().as_slice(), read("passphrase-key.txt"));
+    assert_eq!(
+        Fingerprint::of(&key.recipient()),
+        kid.passphrase_fingerprint()
+    );
+}
+
+fn signed_part(bytes: &[u8]) -> &[u8] {
+    let body = &bytes[..bytes.len() - 1];
+    &bytes[..body.iter().rposition(|&b| b == b'\n').unwrap() + 1]
+}
+
+#[test]
+fn committed_guardian_records_verify_and_open() {
+    let f = fixtures();
+    let wrap_bytes = read("guardian-wrap.txt");
+    let signed = GuardianWrap::decode(&wrap_bytes).unwrap();
+    assert_eq!(
+        signed.unverified().signed_bytes(signed.signer()).unwrap(),
+        signed_part(&wrap_bytes)
+    );
+    let wrap = signed.verify_first(&f.alice.verifying_key()).unwrap();
+    assert_eq!(wrap.epoch(), 1);
+    assert_eq!(wrap.owner(), ALICE);
+    let ids: Vec<UserId> = wrap.guardians().iter().map(|g| g.key.user_id).collect();
+    assert_eq!(ids, vec![ALICE, BOB]);
+    assert!(wrap.guardians().iter().all(|g| g.added_at == WRAP_TIME));
+
+    let expected = read("wrapped-identity.txt");
+    for g in [&f.alice, &f.bob] {
+        let kid = guardian::unlock_as_guardian(&wrap, g).unwrap();
+        assert_eq!(kid.encode().unwrap().as_slice(), expected);
+    }
+    let pass = SecretString::from(KID_PASSPHRASE.to_owned());
+    let key = PassphraseKey::open(
+        &read("passphrase-key.age"),
+        pass.clone(),
+        ScryptCost::new(10).unwrap(),
+        KID,
+    )
+    .unwrap();
+    assert_eq!(key.encode().unwrap().as_slice(), read("passphrase-key.txt"));
+    let (by_pass, _) = KidIdentity::unlock_with_passphrase(
+        &wrap_bytes,
+        &read("passphrase-key.age"),
+        pass,
+        ScryptCost::new(10).unwrap(),
+        KID,
+    )
+    .unwrap();
+    assert_eq!(by_pass.encode().unwrap().as_slice(), expected);
+    let recovery = RecoveryKey::parse(KID_RECOVERY_KEY).unwrap();
+    let (by_recovery, _) = KidIdentity::unlock_with_recovery(&wrap_bytes, &recovery, KID).unwrap();
+    assert_eq!(by_recovery.encode().unwrap().as_slice(), expected);
+
+    let ended_bytes = read("guardian-wrap-2.txt");
+    let end_bytes = read("guardian-end.txt");
+    let end = GuardianEnd::decode(&end_bytes).unwrap();
+    assert_eq!(
+        end.unverified().signed_bytes(end.signer()).unwrap(),
+        signed_part(&end_bytes)
+    );
+    let (ended, end) = GuardianWrap::decode(&ended_bytes)
+        .unwrap()
+        .verify_end(&wrap, end)
+        .unwrap();
+    assert_eq!(ended.access(), Access::Ended);
+    assert_eq!(ended.previous(), Some(wrap.digest()));
+    assert_eq!(end.ended_at, END_TIME);
+    assert!(matches!(
+        guardian::unlock_as_guardian(&ended, &f.bob),
+        Err(home_crypto::Error::AccessEnded)
+    ));
+}
+
+/// Rewrites the guardian vectors only (the other vectors keep their committed ciphertexts).
+#[test]
+#[ignore = "run explicitly to regenerate the guardian vectors"]
+fn regenerate_guardian() {
+    let f = fixtures();
+    let write = |name: &str, bytes: &[u8]| std::fs::write(dir().join(name), bytes).unwrap();
+    let kid = KidIdentity::decode(kid_identity_text().as_bytes()).unwrap();
+    write("wrapped-identity.txt", &kid.encode().unwrap());
+    let key = PassphraseKey::decode(passphrase_key_text().as_bytes()).unwrap();
+    write("passphrase-key.txt", &key.encode().unwrap());
+    let mut scrypt = age::scrypt::Recipient::new(SecretString::from(KID_PASSPHRASE.to_owned()));
+    scrypt.set_work_factor(10);
+    write(
+        "passphrase-key.age",
+        &age::encrypt(&scrypt, &key.encode().unwrap()).unwrap(),
+    );
+    let first = guardian::wrap_first(&kid, &f.alice, &[PersonKey::of(&f.bob)], WRAP_TIME).unwrap();
+    write("guardian-wrap.txt", &first.wrap);
+    let end = guardian::end_guardian_access(
+        &first.state,
+        &kid,
+        SecretString::from("grown up".to_owned()),
+        ScryptCost::new(10).unwrap(),
+        &Keyring::new(KID),
+        &[],
+        END_TIME,
+    )
+    .unwrap();
+    write("guardian-wrap-2.txt", &end.wrap.wrap);
+    write("guardian-end.txt", end.end.as_ref().unwrap());
+}
+
+/// What a version-2 reader does with version-3 records: every v2 parser refuses them as a wrong record type
+/// (signed-record parsers refuse an unsigned record before reading its type), and the v3 parsers refuse v2
+/// records the same way.
+#[test]
+fn version_3_records_are_refused_cleanly_by_version_2_parsers() {
+    use home_crypto::Error;
+    let wrong_type =
+        |r: Result<(), Error>| matches!(r, Err(Error::Malformed("record type") | Error::Unsigned));
+    for v3 in [
+        "wrapped-identity.txt",
+        "passphrase-key.txt",
+        "guardian-wrap.txt",
+        "guardian-end.txt",
+    ] {
+        let bytes = read(v3);
+        assert!(wrong_type(UserKeys::decode(&bytes).map(drop)), "{v3}");
+        assert!(wrong_type(Keyring::decode(&bytes).map(drop)), "{v3}");
+        assert!(wrong_type(Grant::decode(&bytes).map(drop)), "{v3}");
+        assert!(wrong_type(Roster::decode(&bytes).map(drop)), "{v3}");
+        assert!(wrong_type(Rotation::decode(&bytes).map(drop)), "{v3}");
+    }
+    for v2 in ["user-identity.txt", "grant.txt", "roster.txt"] {
+        let bytes = read(v2);
+        assert!(wrong_type(KidIdentity::decode(&bytes).map(drop)), "{v2}");
+        assert!(wrong_type(PassphraseKey::decode(&bytes).map(drop)), "{v2}");
+        assert!(wrong_type(GuardianWrap::decode(&bytes).map(drop)), "{v2}");
+        assert!(wrong_type(GuardianEnd::decode(&bytes).map(drop)), "{v2}");
+    }
 }

@@ -5,7 +5,9 @@ use crate::ids::UserId;
 use crate::sign::{Signature, Signed, SigningKey};
 
 pub(crate) const MAX_RECORD_BYTES: usize = 1 << 20;
-const PREFIX: &str = "home-crypto/v2/";
+/// Record kinds carry their format version: `v2/grant`, `v3/guardian-wrap`. A reader that does not know a
+/// kind (an older client meeting a version-3 record) refuses it as a wrong record type.
+const PREFIX: &str = "home-crypto/";
 const SIGNATURE_LINE: &[u8] = b"signature: ";
 
 fn valid_value(value: &str) -> bool {
@@ -183,7 +185,7 @@ mod tests {
     #[test]
     fn rejects_non_canonical_records() {
         let ok = b"home-crypto/v2/t\na: 1\nb: x\nb: y\n";
-        let mut r = Reader::new(ok, "t").unwrap();
+        let mut r = Reader::new(ok, "v2/t").unwrap();
         assert_eq!(r.field("a").unwrap(), "1");
         assert_eq!(r.repeated("b").unwrap(), ["x", "y"]);
         r.finish().unwrap();
@@ -194,8 +196,9 @@ mod tests {
             b"home-crypto/v2/t\na: 1\r\n",
             b"home-crypto/v2/u\na: 1\n",
             b"home-crypto/v2/t\na:  1\n\x01",
+            b"home-crypto/v3/t\na: 1\n",
         ] {
-            let parsed = Reader::new(bad, "t").and_then(|mut r| {
+            let parsed = Reader::new(bad, "v2/t").and_then(|mut r| {
                 r.field("a")?;
                 r.finish()
             });

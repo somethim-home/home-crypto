@@ -36,6 +36,12 @@ pub enum Error {
     KeyChanged {
         user: UserId,
     },
+    /// The person is not a current guardian of this kid.
+    NotGuardian,
+    /// Guardian access to this kid has ended; an older record that still grants it is refused.
+    AccessEnded,
+    /// A guardian record does not follow the trusted one (epoch, previous hash, kid or owner differ).
+    NotSuccessor,
 }
 
 impl fmt::Display for Error {
@@ -69,6 +75,9 @@ impl fmt::Display for Error {
             Self::KeyChanged { user } => {
                 write!(f, "verifying key of {user} differs from the pinned key")
             }
+            Self::NotGuardian => f.write_str("not a guardian of this kid"),
+            Self::AccessEnded => f.write_str("guardian access has ended"),
+            Self::NotSuccessor => f.write_str("record does not follow the trusted guardian record"),
         }
     }
 }

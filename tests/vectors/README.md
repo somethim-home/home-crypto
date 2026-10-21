@@ -21,6 +21,23 @@ Deterministic — `cargo test --test vectors` rebuilds these from the fixed inpu
 | `share-link.txt` | Share link for epoch 1 |
 | `fingerprints.txt` | Recipient fingerprints and safety numbers of epochs 1 and 2; verifying key, person fingerprint and safety number of Alice and Bob |
 
+Guardian access (format §9), with a kid `c1…c1` whose identity is fixed by four more X25519 identities from
+`age-keygen` (Go age 1.3.2; grant, keyring, recovery and passphrase identity) and one more Ed25519 seed, and the
+passphrase `purple monkey dishwasher`:
+
+| File | Content | Deterministic |
+| --- | --- | --- |
+| `wrapped-identity.txt` | The kid's `wrapped-identity` record | yes |
+| `passphrase-key.txt` | The kid's `passphrase-key` record, `active` | yes |
+| `passphrase-key.age` | `passphrase-key.txt` sealed with the passphrase (scrypt `log_n = 10`) | no |
+| `guardian-wrap.txt` | Epoch 1: guardians Alice (owner) and Bob, signed by Alice; `identity` is an age file to the passphrase key, the recovery key, Alice and Bob | no (ciphertext inside) |
+| `guardian-wrap-2.txt` | Epoch 2: access ended, a new kid identity (random, not kept), signed by the new kid key | no |
+| `guardian-end.txt` | The end record between them, signed by the kid's key of epoch 1 | no (names the hashes) |
+
+`cargo test --test vectors` re-encodes the two deterministic records, checks that every signed record
+re-encodes to its signed bytes and verifies, and opens the wrap with Alice's and Bob's keys, the passphrase and
+the recovery key. Regenerate only these with `cargo test --test vectors -- --ignored regenerate_guardian`.
+
 Not deterministic — age draws a fresh file key, nonce and ephemeral key (or scrypt salt) from the OS RNG on every
 encryption, and the `age` crate offers no way to inject randomness. These were generated once and are only
 checked by decryption against the deterministic files above:
@@ -57,3 +74,10 @@ and, for the signatures, with an independent Ed25519 implementation (Python `cry
 backend): for `grant.txt`, `roster.txt` and `rotation.txt`, the bytes before the last line verify against
 Alice's verifying key, re-signing them with Alice's seed gives the same signature, and the person fingerprints
 in `fingerprints.txt` equal `SHA-256("home-crypto/v2/person <user-id> <grant recipient> <verifying key>")`.
+
+For the guardian vectors, the same checks were made when generating: Go `age -d` with Bob's grant key, Alice's
+grant key, the kid's recovery key and the passphrase identity each turn the `identity` field of
+`guardian-wrap.txt` (hex-decoded) into `wrapped-identity.txt`; with Python `cryptography` 50, `guardian-wrap.txt`
+verifies against Alice's key and `guardian-end.txt` against the kid's epoch-1 key (re-signing both with the seeds
+gives the same signatures), `guardian-wrap-2.txt` against the key in its own `kid` line, and the hashes in
+`guardian-end.txt` and `previous-sha256` equal the SHA-256 of the wrap files.

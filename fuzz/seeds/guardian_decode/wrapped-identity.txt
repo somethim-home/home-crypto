@@ -1,0 +1,7 @@
+home-crypto/v3/wrapped-identity
+user-id: c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1
+grant-identity: AGE-SECRET-KEY-1X99H9H6PTK4V8P0UUWSHGSDYMCHQYYY23E4AKADVSYZRGQ056KTS7XTWDC
+keyring-identity: AGE-SECRET-KEY-1GHZ73252EH9978LCAG4SGFM3KJXW5YU2MMUDREUV7AH53KXVTAVSC9J2NY
+signing-key: d96da2156ef1476f913fb8c52d957163a033f175ec9925d3309fbf6c47354082
+recovery-recipient: age1jw9uzq7tmlxfm9j29k9hh8klfqgvzuf883u7zd0fj96ncr8fga6qlemv8k
+passphrase-recipient: age1dl0ql0cwqzyezyls88utkpc8nlam9phsz9j949zvaetzw2azaccsd2e3ed

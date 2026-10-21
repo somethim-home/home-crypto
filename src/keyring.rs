@@ -11,7 +11,7 @@ use crate::sign::{Signed, VerifyingKey};
 use crate::space::{Epoch, Grant, Roster, SpaceKey};
 use crate::{Error, agefile};
 
-const KIND: &str = "keyring";
+const KIND: &str = "v2/keyring";
 
 /// How a verifying key relates to the pins (trust on first use).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -38,6 +38,10 @@ impl Keyring {
             keys: BTreeMap::new(),
             pins: BTreeMap::new(),
         }
+    }
+
+    pub fn user_id(&self) -> UserId {
+        self.user_id
     }
 
     pub fn version(&self) -> u64 {

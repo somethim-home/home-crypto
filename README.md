@@ -7,15 +7,15 @@ client (desktop, Android, web via wasm, iOS later via uniffi) and by the `home-f
 format validation only and never holds a key.
 
 Encryption is built on the [age](https://c2sp.org/age) format through the official `age` crate (pinned
-`=0.12.1`): X25519 recipients, scrypt passphrase recipients and the STREAM payload. Grants, rosters and rotation
-records are additionally signed with Ed25519 through `ed25519-dalek` (pinned `=3.0.0`), because age cannot
+`=0.12.1`): X25519 recipients, scrypt passphrase recipients and the STREAM payload. Grants, rosters, rotation
+records and guardian records are additionally signed with Ed25519 through `ed25519-dalek` (pinned `=3.0.0`), because age cannot
 authenticate a sender. There are no other primitives. The design decides *which* age file is encrypted to
 *which* recipients and signed by *whom*, and that layer is what needs the review.
 
 - `docs/threat-model.md`: assets, actors, what is protected, the metadata the server still sees, the web-client
   caveat, and what happens when keys are lost.
-- `docs/format.md`: the exact format. Our own design decisions are marked **[own design]** and unresolved
-  points **[open]**.
+- `docs/format.md`: the exact format (version 3). Our own design decisions are marked **[own design]** and
+  unresolved points **[open]**.
 
 ## What it is
 
@@ -31,10 +31,18 @@ authenticate a sender. There are no other primitives. The design decides *which*
 - Manifest: a canonical binary encoding plus encrypted segments, with deterministic merge (commutative,
   associative, idempotent), conflict detection and compaction.
 - Share links: the space key travels in the URL fragment.
+- Guardian access for kids (module `guardian`, format §9): a kid's identity is wrapped to the kid's passphrase
+  key, the kid's recovery key and every guardian (the owner always, plus the parents the owner adds), in a
+  signed, hash-chained wrap. A guardian unlocks the kid with their own key and reads everything the kid can.
+  Adding a guardian re-wraps; removing one rotates the kid's identity, moves every space to the new keys and
+  re-keys the spaces the removed guardian could read only through the kid; the kid ends guardian access with a
+  new identity only they know and a signed end record.
 
 ## What it is not
 
 - Not a server, client or sync engine. Transport, storage, quotas and authentication (home-auth) live elsewhere.
+- Not private from guardians. While guardian access lasts, a kid's guardians read everything the kid reads and
+  can act as the kid; a removed guardian keeps what they had (see the threat model, "Kids and guardians").
 - Not authenticated per file. Grants, rosters and rotations are signed, but objects and manifest entries are
   not: members of a space trust each other with its files. An admin can sign bad membership changes, and a
   first-contact invitation is only as good as the key the server publishes (see the threat model).
@@ -52,12 +60,17 @@ cargo check --target wasm32-unknown-unknown
 ```
 
 Test vectors live in `tests/vectors/`; their README explains which are deterministic and how to regenerate them.
-Property tests in `tests/manifest_props.rs` cover merge, compaction, encoding and parser robustness. A cargo-fuzz
-target for the manifest parser is in `fuzz/`. Running it needs nightly and `cargo install cargo-fuzz`:
+Property tests in `tests/manifest_props.rs` cover merge, compaction, encoding and parser robustness;
+`tests/signature_props.rs` and `tests/guardian_props.rs` cover the signed records and random sequences of guardian
+changes. Guardian flows are in `tests/guardian.rs`. cargo-fuzz targets for the manifest parser and the guardian
+record parsers are in `fuzz/`. Running them needs nightly and `cargo install cargo-fuzz`:
 
 ```
 cd fuzz && cargo +nightly fuzz run manifest_decode seeds/manifest_decode
+cd fuzz && cargo +nightly fuzz run guardian_decode seeds/guardian_decode
 ```
+
+On stable, `cd fuzz && cargo build` builds both targets (without coverage instrumentation).
 
 ## Safety notes
 

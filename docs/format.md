@@ -1,4 +1,4 @@
-# Home Files encryption format, version 2
+# Home Files encryption format, version 3
 
 Status: draft, unreviewed. Threat model: `docs/threat-model.md`. Implementation: this crate (`home-crypto`).
 
@@ -10,15 +10,16 @@ and consumed by the Rust `age` crate (pinned `=0.12.1`). Only these age features
 - the STREAM payload (ChaCha20-Poly1305, 64 KiB chunks), including its seekable decryption.
 
 No other cipher, MAC or KDF is used. The one primitive outside age is **Ed25519** (RFC 8032, pure Ed25519, no
-pre-hash, no context), through the `ed25519-dalek` crate (pinned `=3.0.0`), for signatures on grants, rosters
-and rotation records (§1.2). It closes what age cannot: age has no sender authentication. Outside age, the
+pre-hash, no context), through the `ed25519-dalek` crate (pinned `=3.0.0`), for signatures on grants, rosters,
+rotation records and guardian records (§1.2). It closes what age cannot: age has no sender authentication. Outside age, the
 format also uses SHA-256 for non-secret values (content hashes and fingerprints) and a CSPRNG (`getrandom`) for
 identifiers and signing-key seeds. Everything else is *which* plaintext is put into *which* age file, encrypted
 to *which* recipients and signed by *whom* — that layer is our own design and is what needs review.
 
 Version 2 differs from version 1 only in the text records (§1.1): every person has a signing key, and grants,
-rosters and rotations are signed. Objects, manifest segments and share links are unchanged and keep their
-version-1 identifiers (§8).
+rosters and rotations are signed. Version 3 adds **guardian access** for kids (§9): four new record types with
+version-3 identifiers. Every version-2 record is unchanged and keeps its version-2 identifier; objects, manifest
+segments and share links keep their version-1 identifiers (§8).
 
 Items marked **[own design]** are decisions made for this format, not taken from age. Items marked
 **[open]** are unresolved and listed again at the end.
@@ -45,17 +46,19 @@ Items marked **[own design]** are decisions made for this format, not taken from
 
 ### 1.1 Text records **[own design]**
 
-Small records (identity, keyring, grant, roster, rotation) are UTF-8 text inside the age payload:
+Small records (identity, keyring, grant, roster, rotation, and the guardian records of §9) are UTF-8 text,
+inside an age payload except for the guardian wrap and end records, which are stored as they are:
 
 ```
-home-crypto/v2/<type>\n
+home-crypto/v<version>/<type>\n
 <key>: <value>\n
 …
 ```
 
 Rules, enforced by the parser (anything else is rejected):
 
-- first line is exactly the type identifier; keys appear in the fixed order given for each type;
+- first line is exactly the type identifier, including its version (`v2` or `v3`, given per type below);
+  keys appear in the fixed order given for each type;
 - each line is `key`, `": "`, value, `"\n"`; only keys marked "repeated" may occur more than once, and repeated
   lines are sorted as specified and contain no duplicates;
 - values are non-empty and contain no Unicode control characters (category Cc: U+0000–U+001F,
@@ -68,8 +71,8 @@ Because the encoding is canonical, decoding and re-encoding a valid record gives
 
 ### 1.2 Signed records **[own design]**
 
-Grants, rosters and rotation records are *signed records*. After the type's own fields they end with exactly
-two lines:
+Grants, rosters, rotation records, guardian wraps and guardian-end records are *signed records*. After the
+type's own fields they end with exactly two lines:
 
 ```
 signed-by: <user-id>\n
@@ -78,7 +81,7 @@ signature: <128 lowercase hex characters>\n
 
 The signature is pure Ed25519 by the signer's signing key over **every byte of the record before the
 `signature` line**: the type line, all fields and the `signed-by` line, each with its `\n`. The type line
-(`home-crypto/v2/<type>`) is the domain separator: a signature over one record type cannot be reused for
+(`home-crypto/v<version>/<type>`) is the domain separator: a signature over one record type cannot be reused for
 another, and the signing key is used for nothing else. Since the record is canonical and Ed25519 is
 deterministic, the signed bytes and the signature are reproducible (test vectors).
 
@@ -311,7 +314,9 @@ Per object and segment: id, ciphertext size, upload/download times, uploader, ac
 existence, membership, epochs, rosters' and rotations' existence and sizes, manifest segment count and sizes.
 Per person: grant recipient, verifying key, sealed identity files, keyring size and version count. Signatures
 are inside age files, so the server does not see who signed a roster or rotation (it sees who uploaded it).
-See the threat model.
+Per kid (§9): the guardian wraps in full — who the guardians are, who added each and when, the epochs and
+times of every change, who signed it, the kid's key rotations, the number of recipients of the wrapped
+identity — and the end record with its time. See the threat model.
 
 ## 6. File objects
 
@@ -452,14 +457,16 @@ match the space being read.
 | Item | Identifier |
 | --- | --- |
 | Every encrypted file | age header `age-encryption.org/v1` |
-| Text records | first line `home-crypto/v2/<type>`, `<type>` ∈ `user-identity`, `keyring`, `grant`, `roster`, `rotation`; the last three are signed (§1.2) |
+| Text records, version 2 (unchanged in version 3) | first line `home-crypto/v2/<type>`, `<type>` ∈ `user-identity`, `keyring`, `grant`, `roster`, `rotation`; the last three are signed (§1.2) |
+| Text records, version 3 | first line `home-crypto/v3/<type>`, `<type>` ∈ `passphrase-key`, `wrapped-identity`, `guardian-wrap`, `guardian-end`; the last two are signed (§9) |
 | Objects | prefix `HCOB` `0x01` (unchanged since version 1) |
 | Manifest segments | `HCMF` `0x01` (unchanged since version 1) |
 | Share links | fragment prefix `v1:` (unchanged since version 1) |
 | Person fingerprint input | prefix `home-crypto/v2/person` |
 
 Readers reject unknown versions. A future version gets new identifiers; readers keep supporting older ones
-until all data is migrated. The `age` and `ed25519-dalek` crates are pinned to exact versions; upgrading either
+until all data is migrated. A record type changes its identifier only when its own encoding changes, so a
+version adds identifiers rather than replacing all of them. The `age` and `ed25519-dalek` crates are pinned to exact versions; upgrading either
 requires the test vectors (`tests/vectors/`) to keep passing.
 
 **Migration from version 1.** Version 1 was never used for real data, so there is no migration: version-2
@@ -467,7 +474,229 @@ readers refuse `home-crypto/v1/…` records (all five record types changed: the 
 the keyring gained pins, the roster gained verifying keys, and grants, rosters and rotations are signed).
 Objects, manifest segments and share links did not change, so their identifiers stay at version 1.
 
-## 9. Open questions
+**Version 3.** Only adds record types (§9); nothing that exists changes. Version-3 readers read every
+version-2 record. Version-2 readers refuse the new records cleanly: their parsers see an unknown first line
+(`home-crypto/v3/…`) and return a record-type error, or, for their signed-record parsers given an unsigned
+record, an "unsigned" error (tested in `tests/vectors.rs`). A version-2 client therefore cannot unlock a kid
+whose identity is held only in a guardian wrap; it reports the record as unsupported instead of misreading it.
+Adults keep the version-2 `identity.passphrase.age` and `identity.recovery.age`.
+
+## 9. Guardian access (kids) **[own design: everything in §9]**
+
+A kid's identity is readable by the kid **and by the kid's guardians**: the owner (always) and the adults the
+owner marks as the kid's parents. A guardian unlocks the kid's identity with their own grant identity, never
+with the kid's passphrase, and then reads everything the kid can: the kid's keyring holds every space key the
+kid has, including spaces the kid joins later. The server stores the records below and stays ciphertext-only.
+
+Implementation: module `guardian`. Kids do not have `identity.passphrase.age` / `identity.recovery.age`
+(§2.1); they have the files of this section instead.
+
+### 9.1 `passphrase-key` record (`passphrase-key.age`, to the kid's passphrase)
+
+```
+home-crypto/v3/passphrase-key
+user-id: <kid user-id>
+passphrase-identity: AGE-SECRET-KEY-1…
+guardian-access: active | ended
+```
+
+An age file to a **scrypt passphrase recipient only** (same work factors as §2.1). The *passphrase identity*
+inside is an X25519 identity; the kid's identity is wrapped to its recipient (§9.3). This indirection lets a
+guardian re-wrap the kid's identity — even a new one after a rotation — for the kid's passphrase without knowing
+the passphrase. A new passphrase means a new passphrase identity.
+
+`guardian-access: ended` is written only at the end of guardian access (§9.7), by the kid, with a passphrase no
+guardian knows. A kid's device accepts an ended wrap only with an ended passphrase key, and refuses a wrap that
+still has guardians when its passphrase key says `ended`.
+
+### 9.2 `wrapped-identity` record (inside the wrap, §9.3)
+
+```
+home-crypto/v3/wrapped-identity
+user-id: <kid user-id>
+grant-identity: AGE-SECRET-KEY-1…
+keyring-identity: AGE-SECRET-KEY-1…
+signing-key: <Ed25519 seed>
+recovery-recipient: age1…
+passphrase-recipient: age1…
+```
+
+The fields of `user-identity` (§2.1) plus the passphrase-key recipient. Both recipients are known only to
+holders of the identity (the kid's devices and the guardians), never to the server.
+
+### 9.3 `guardian-wrap` record (stored as is, signed)
+
+```
+home-crypto/v3/guardian-wrap
+kid: <kid user-id> age1…<kid grant recipient> <kid verifying key>
+owner: <owner user-id>
+epoch: <u64, starting at 1>
+previous-sha256: <SHA-256 of the previous wrap record> | none
+guardian-access: active | ended
+passphrase-recipient-sha256: <recipient fingerprint of the passphrase-key recipient>
+guardian: <user-id> age1…<grant recipient> <verifying key> <added-by user-id> <added-at>   (repeated, sorted by user-id, ≤ 32)
+identity: <the wrapped identity file, lowercase hex>
+signed-by: <user-id>
+signature: <signature>
+```
+
+- `identity` is **one age file** with one X25519 stanza per recipient: the passphrase-key recipient (§9.1), the
+  kid's recovery recipient, and the grant recipient of every listed guardian. Its plaintext is the
+  `wrapped-identity` record. The stanzas do not reveal their recipients. At most 64 KiB.
+- `kid` names the public keys of the identity inside; readers refuse a decrypted identity whose grant
+  recipient, verifying key or passphrase-recipient fingerprint differ from the record.
+- `guardian` lines are the **signed roster of guardians**: who, who added them, and when (`added-at`,
+  milliseconds since the Unix epoch, client time, untrusted). While `active`, the owner is always listed; an
+  `ended` wrap lists none. The kid is never a guardian, and the owner is never the kid.
+- `epoch` increases by one with every new wrap; `previous-sha256` is the SHA-256 of every byte of the previous
+  wrap record (including its signature line), `none` exactly when `epoch` is 1. Together they chain the wraps.
+- **Signers**: the owner (only while `active`) or the kid. The record lists the key for either: the owner's
+  `guardian` line or the `kid` line. Any other `signed-by` is refused when parsing. "The kid" means the kid's
+  key, held by the kid's devices *and by every guardian* (they hold the identity).
+
+The record is not encrypted: guardians, the server (for validation) and anyone following the chain read it.
+It shows the server who the guardians are and the kid's public keys, which the server knows anyway.
+
+### 9.4 Accepting wraps
+
+Each device that follows a kid (the kid's devices, every guardian, optionally the server) keeps the last wrap
+it accepted, the *trusted wrap*, and accepts:
+
+- **A first wrap** (setup, or a device that never saw this kid): signed by the owner or the kid, verified with
+  the signer's **pinned** key, or on first use the key the server publishes for them (shown with their person
+  fingerprint, like an invitation, §3.2), and the record must list that same key for the signer. Afterwards
+  the kid's key and every guardian's key are pinned (§2.2); a conflict with a pin refuses the whole wrap.
+- **A successor** of the trusted wrap, for anything but the end of access, when all of these hold:
+  1. same kid and owner, `epoch` one higher, `previous-sha256` equal to the hash of the trusted wrap;
+  2. if signed by the **owner**, verified with the key the trusted wrap lists for the owner: the owner stays a
+     guardian with an unchanged line; every guardian that stays keeps its line unchanged; new guardians are
+     `added-by` the owner; guardians may be removed; the `kid` keys may change (identity rotation, §9.5);
+  3. if signed by the **kid**, verified with the kid key of the trusted wrap: the `kid` line is unchanged;
+     every guardian of the trusted wrap stays with an unchanged line; new guardians are `added-by` the kid or a
+     guardian of the trusted wrap (a guardian adding someone signs with the kid's key and is recorded as
+     `added-by`). The kid's key can therefore add guardians and re-wrap, but never remove one or replace the
+     identity;
+  4. after the end of access: only the kid signs, the `kid` line stays, access stays `ended`.
+- **The end of access**: §9.7.
+
+A wrap with a lower epoch than the trusted wrap is ignored; a different wrap with the same epoch is a fork
+(two writers raced); the server stores wraps with compare-and-swap on the epoch, so the loser re-reads and
+re-applies. Pins move with the chain: when a verified successor carries new `kid` keys, the device replaces its
+pin for the kid (the owner vouched for the change) — the only way the kid's pin changes without a person
+comparing fingerprints.
+
+Operations (all upload a new wrap with compare-and-swap):
+
+- **Set up a kid** (owner's device): generate the kid's identity, a recovery identity (printed once) and a
+  passphrase identity sealed with the passphrase the kid types (§9.1); wrap to the passphrase key, the
+  recovery recipient, the owner and the parents; sign as the owner (epoch 1). The kid's keyring starts with pins
+  for the kid, the owner and the parents.
+- **Add a guardian**: whoever holds the kid's identity — the owner (signs as owner), the kid's device or a
+  current guardian (sign with the kid's key) — re-wraps to one more grant recipient, after checking the new
+  guardian's keys against their pins.
+- **Change the passphrase / the recovery key** (kid's device): a new passphrase identity, or a new recovery
+  recipient inside the identity; re-wrap signed by the kid.
+
+### 9.5 Guardian unlock, and removing a guardian
+
+**Unlock as guardian.** A guardian decrypts `identity` from the trusted wrap with their own grant identity,
+checks it against the `kid` line, and holds the kid's identity in memory only. With it they open the kid's
+keyring (§2.2) and the kid's grant inbox. Ended wraps are refused.
+
+**Remove a guardian** (owner's device; the owner holds the kid's identity as a guardian):
+
+1. Rotate the kid's identity: new grant identity, keyring identity and signing key for the same user id. The
+   passphrase-key recipient stays (the owner cannot seal a new one without the passphrase); the recovery
+   recipient stays unless the owner issues a new recovery key, which is recommended when the removed guardian
+   may have seen the printed one.
+2. Wrap the new identity to the passphrase key, the recovery recipient and the remaining guardians; sign as the
+   owner (successor rule 2). Publish the new grant recipient and verifying key.
+3. Write the kid's keyring for the new identity: every space key of the old keyring (all epochs), the pins,
+   the kid's own pin moved to the new key.
+4. For each space of the kid (its latest epoch and trusted roster):
+   - if the removed guardian is **not a member**, they could read it only through the kid: **rotate** it to a
+     new epoch (§3.4) with no one removed and the kid's member line carrying the new keys, so the grant goes to
+     the kid's new grant recipient; then re-encrypt its objects (§6.3). The new epoch key goes straight into the
+     kid's new keyring;
+   - otherwise, write the same epoch's roster again with the kid's new member line (a change within the epoch,
+     §3.1).
+
+   Each is signed by the owner if the owner is an admin of that space, else by the kid's *old* key if the kid
+   is (the key the other members' trusted roster lists). Spaces with neither, or without a trusted roster at
+   hand, are reported as *pending* for an admin of that space.
+5. Other members accept the rotation (§3.4) or roster change (§3.1). Their pin for the kid moves only through
+   the wrap chain (§9.4) or an in-person fingerprint comparison.
+
+What the removed guardian keeps: the kid's old identity, the old keyring and every space key up to the
+rotation, and every plaintext they already had. Old ciphertext they kept, or that the server still serves
+before re-encryption, stays readable to them. They cannot open the new wrap, the new keyring, new epochs of
+the rotated spaces, re-encrypted objects, or spaces the kid joins afterwards. Spaces where they are a member in
+their own right are unaffected.
+
+### 9.6 The kid's devices
+
+- **Passphrase**: open `passphrase-key.age` with the passphrase, check its `user-id`; parse the wrap and verify
+  it with the key it lists for its signer; require `passphrase-recipient-sha256` to match the passphrase key;
+  refuse an `ended` wrap with an `active` passphrase key and vice versa; decrypt `identity` with the passphrase
+  identity and check it against the `kid` line.
+- **Recovery key**: the same, decrypting with the recovery identity.
+- After unlocking, the device opens the kid's keyring and checks the wrap's owner, guardian and kid keys against
+  the kid's pins (refusing a key change), and remembers the wrap epoch.
+
+On a device that has never seen this kid's chain, the self-listed key is all there is to check the signature
+with; what keeps the server out is that the passphrase-key and recovery recipients are unknown to it, as for
+§2.1. They are known to guardians, including removed ones (see the threat model).
+
+### 9.7 End of guardian access (`guardian-end` record, signed)
+
+When the kid grows up, the kid's device (with a new passphrase typed by the kid):
+
+1. rotates the kid's identity, creates a new recovery identity and a new passphrase identity sealed as
+   `guardian-access: ended` (§9.1);
+2. writes wrap `n + 1`: `ended`, no guardians, the new `kid` keys, wrapped to the new passphrase key and the new
+   recovery recipient only, **signed by the new kid key**;
+3. writes the `guardian-end` record, **signed by the kid key of wrap `n`**:
+
+   ```
+   home-crypto/v3/guardian-end
+   kid: <kid user-id>
+   owner: <owner user-id>
+   from-epoch: <n>
+   from-sha256: <hash of wrap n>
+   to-sha256: <hash of wrap n+1>
+   new-kid: <kid user-id> age1…<new grant recipient> <new verifying key>
+   ended-at: <milliseconds, client time>
+   signed-by: <kid user-id>
+   signature: <signature>
+   ```
+
+4. writes the keyring for the new identity and moves the kid's spaces as in §9.5 step 4, with *every* former
+   guardian as the one who loses access (rotate where any of them is not a member), signed by the kid's old key
+   where the kid is an admin; other spaces are pending for their admins (for example the owner's Family space,
+   where only the kid's member line changes).
+
+Followers accept wrap `n + 1` after trusted wrap `n` only with the end record: it is signed by the kid key of
+wrap `n`, names both hashes, `from-epoch` = `n`, and `new-kid` equals the new wrap's `kid` line, which differs
+from wrap `n` in both keys; wrap `n + 1` verifies with that new key. Ended is final: later wraps are kid-signed
+re-wraps (passphrase or recovery changes) that keep the keys and list no guardians.
+
+Since every guardian also holds the kid's old key, a guardian can produce an end that verifies; the kid's
+devices still refuse to use it unless the kid's own passphrase opens an `ended` passphrase key matching it, so
+the kid notices at the next unlock rather than using an identity the guardian knows.
+
+### 9.8 Stored on the server, per kid
+
+| File | Readable by |
+| --- | --- |
+| `passphrase-key.age` | the kid's passphrase |
+| `guardian-wrap` (latest, plus the chain for followers that fell behind) | anyone (signed; `identity` inside is an age file for the passphrase key, the recovery identity and the guardians) |
+| `guardian-end` (once) | anyone (signed) |
+| `keyring.age` | holders of the kid's identity (kid and guardians) |
+
+Grant recipient and verifying key are published as for any person. The server can validate every guardian
+record and its successor rules with this crate, since all keys involved are public.
+
+## 10. Open questions
 
 1. **Re-wrap vs re-encrypt** on member removal (§6.3): re-wrapping is not possible with the `age` crate's
    public API; the format re-encrypts.
@@ -488,3 +717,15 @@ Objects, manifest segments and share links did not change, so their identifiers 
    but a device that has not seen the newer one cannot tell.
 9. **Signing-key rotation**: there is no way to replace a person's signing key while keeping their identity;
    a new key is always a key change that people must confirm in person.
+10. **Guardian chain on a fresh device** (§9.6): a kid's device that has never seen the chain verifies a wrap
+    with the key the wrap lists; its protection is that the passphrase-key and recovery recipients are secret
+    from the server. A removed guardian knows both (until the kid changes passphrase and recovery key) and,
+    with the server, can make such a device unlock an older identity they know. Should a removal force a new
+    passphrase key at the kid's next unlock, and should wraps be anchored to the owner's key in the
+    passphrase-key record?
+11. **Who may add guardians** (§9.4): the kid's key may add guardians, so the kid, or any guardian, can add a
+    guardian without the owner. The owner sees `added-by` and can remove them, but cannot prevent it. Should
+    additions require the owner's signature?
+12. **Racing an identity rotation** (§9.5): spaces where the kid is the admin are re-keyed with the kid's old
+    key, which the removed guardian also holds; they can race the rotation as a removed admin can (threat
+    model). The owner signing every kid space as a second admin would close it.

@@ -6,11 +6,11 @@ Status: draft, unreviewed. Companion to `docs/format.md`. Source plans: infra `0
 ## Scope
 
 Family file storage on the home server. Each person has a private space; shared spaces (for example
-"Family") have several members. Clients (desktop, Android, web, iOS later) encrypt before upload and decrypt
+"Family") have several members. Kids' identities are also readable by their guardians (format §9). Clients (desktop, Android, web, iOS later) encrypt before upload and decrypt
 after download. The server (`home-files`) stores and serves ciphertext only and enforces accounts, membership
 and quotas.
 
-Out of scope: the server-readable media library (Jellyfin and similar), which is explicitly not end-to-end
+Out of scope: the server-readable media library (the Media app), which is explicitly not end-to-end
 encrypted; transport security (TLS/WireGuard) beyond noting it is required; availability guarantees; the
 security of the devices themselves.
 
@@ -23,6 +23,8 @@ security of the devices themselves.
 | User identity (grant identity, keyring identity, Ed25519 signing key) | Plaintext only in client memory / client key store; on the server only as two age files sealed by passphrase and by recovery identity |
 | Pinned verifying keys (trust on first use) | The person's keyring (age file to the secret keyring recipient) |
 | Recovery identity | Printed once on paper (or stored by the person); never on the server |
+| A kid's identity | Kid's and guardians' devices (plaintext, in memory); on the server only inside the signed guardian wrap, as one age file to the kid's passphrase key, the kid's recovery recipient and every guardian's grant recipient |
+| A kid's passphrase identity | Inside `passphrase-key.age`, sealed by the kid's passphrase; its recipient is known to the kid and the guardians, never to the server |
 | Passphrase | The person's memory / password manager; never sent to the server |
 | Space identities (one per space per epoch) | The member's keyring (age file to the keyring recipient) and grants (age file to the member's grant recipient) |
 | Share-link identities | The URL fragment held by the link recipient |
@@ -37,6 +39,9 @@ security of the devices themselves.
 | Removed member | Was a member; keeps every identity and every plaintext they had before removal; may still have network access to the server via another space or may collude with the operator. |
 | Network attacker | On the tailnet now, on the internet once the server is exposed (plan 007 static-IP step). Can observe and tamper with traffic outside TLS/WireGuard and attack the server's public surface. |
 | Device thief | Has one unlocked or locked client device. |
+| Kid | A person whose identity has guardians (format §9). Trusted with their own data; not trusted to manage membership of the household. |
+| Guardian | The owner (always) or a parent the owner added. Holds the kid's identity whenever they unlock it, so everything the kid can read, and the kid's signing key. Trusted by the household with the kid's data. |
+| Removed guardian | Was a guardian; keeps the kid's old identity and everything it opened; may collude with the operator. |
 
 ## What is protected
 
@@ -71,6 +76,60 @@ security of the devices themselves.
    removed member never receives. New files, new manifest entries and re-encrypted old files are unreadable
    to them. Because the rotation is signed by an admin of the previous epoch, a removed (non-admin) member
    colluding with the server can no longer forge a rotation that remaining members accept.
+
+9. **Guardian access is authenticated.** A kid's guardian wrap is signed by the owner or by the kid's key,
+   and each new wrap names the hash of the one before (format §9.4). The server cannot add a guardian, remove
+   one, swap the kid's identity, or splice wraps of different epochs: it holds neither the owner's nor the
+   kid's signing key, and guardians and the kid's devices verify every step against keys they pinned. Only
+   the owner's signature can remove a guardian or replace the kid's identity.
+10. **Removing a guardian works going forward.** The kid's identity is rotated, the new one is wrapped only to
+    the remaining guardians, and every space the removed guardian could read only through the kid moves to a
+    new epoch (format §9.5).
+
+## Kids and guardians
+
+**Who can read a kid's data.** The kid; every current guardian (the owner always, plus the parents the owner
+added, plus anyone the kid's key added — see below); and, as for everyone, the other members of each space the
+kid is in, for that space. A guardian holds the kid's whole identity, so they read the kid's private space and
+every shared space the kid is a member of, including spaces the kid joins after the guardian was added, and
+can act as the kid: accept invitations, write files, sign with the kid's key (for example as admin of the
+kid's private space), and add further guardians. The kid cannot hide anything from their guardians while
+access is active, and the client must tell the kid so plainly.
+
+**What the server can and cannot do.** It cannot read a kid's data or identity, add itself or anyone else as
+a guardian, remove a guardian, or swap the kid's identity: every wrap is signed and chained, and the wrapped
+identity is an age file to recipients the server does not control. It still sees the guardian list, who added
+whom and when, every change of the chain and its timing, the kid's key rotations and the end of access
+(format §5). It can withhold or roll back wraps: a device that already follows the chain refuses older epochs,
+but a kid's *fresh* device cannot tell an old wrap from the newest (as with the identity files of adults).
+
+**What a removed guardian keeps.** Everything they had before: the kid's old identity (including the old
+signing key), the kid's keyring as of the removal, every space key in it up to the rotation, every plaintext
+they downloaded, and old ciphertext they or the operator kept. Spaces where they are a member themselves are
+unaffected. After the removal they cannot open the new wrap, the kid's new keyring, new epochs of the rotated
+spaces, objects re-encrypted to those epochs, or spaces the kid joins later. Limits:
+
+- objects of a rotated space stay readable to them until a client re-encrypts them (format §6.3);
+- spaces where neither the owner nor the kid is an admin are left *pending*: until that space's admin
+  rotates it, the removed guardian keeps reading new files there through the kid's old identity;
+- they know the kid's passphrase-key recipient and, unless a new recovery key is issued, the recovery
+  recipient. Colluding with the operator they can therefore make a kid's *fresh* device unlock an identity they
+  know (an old one, or one they made up and signed with the kid's old key) until the kid changes the passphrase
+  (and the recovery key). Devices that already follow the chain are not fooled. Mitigation: issue a new recovery
+  key on removal and have the kid's device set a new passphrase key at its next unlock;
+- in spaces where the kid is the admin, the rotation is signed with the kid's old key, which they also hold,
+  so they can race it with a competing one (like a removed admin, below).
+
+**Age-of-majority handover.** The kid's device ends guardian access with a passphrase only the kid knows: a new
+identity, a new passphrase key marked `ended`, a new recovery key, a wrap without guardians signed by the new
+key, a `guardian-end` record signed by the old key, and the kid's spaces re-keyed so no former guardian can
+read them through the kid. The owner does not take part and cannot undo it: ended is final, and no wrap after
+it lists guardians. Former guardians keep what any removed guardian keeps (above), and remain members of the
+spaces they belong to. Since every guardian also holds the kid's old key, a guardian could fake the end with a
+new identity of their own choosing; the other guardians would see a valid end, but the kid's devices refuse it
+because the kid's passphrase does not open that passphrase key, so the kid notices at the next unlock. The same
+guardian could, before the end, have kept the identity or added a friend as guardian; the kid has no protection
+against their own guardians while access lasts.
 
 ## What is not protected (visible or possible to the server)
 
@@ -129,6 +188,8 @@ Other limits:
 - **Passphrase guessing offline.** Anyone holding `identity.passphrase.age` (operator, stolen disk) can run
   an offline scrypt guessing attack. The scrypt cost slows this; a weak passphrase is still a weak point.
 - **Compromised client device.** Malware on an unlocked device sees plaintext and keys. Out of scope.
+- **Guardians see everything a kid sees**, by design, and anyone the kid's key adds becomes a guardian without
+  the owner's signature (the owner sees who added them and can remove them). See "Kids and guardians".
 
 ## Web-client trust caveat
 
@@ -152,6 +213,10 @@ browser, but code served by the server can read it.
   only ciphertext and cannot help. This is by design. Shared spaces stay readable by the other members, who
   can grant them again to a new identity of the same person.
 - A space whose every member has lost their keys is permanently unreadable.
+- **A kid who forgets the passphrase** (while guardian access lasts): a guardian unlocks the kid's identity
+  with their own key and lets the kid type a new passphrase on the guardian's device (a new passphrase key,
+  re-wrap signed with the kid's key). The same works for a lost recovery key. After the end of guardian access
+  the kid is in the adults' position above.
 
 ## Actor-by-actor summary
 
@@ -162,3 +227,5 @@ browser, but code served by the server can read it.
 | Stolen disk / backup | No (offline passphrase guessing only) | All stored metadata | No | n/a |
 | Removed member | Old epoch data they had or can still fetch | Old epoch | With the operator: old-epoch objects and manifest entries; rotations only if they were an admin of the old epoch | Via the operator only |
 | Network attacker | No (with TLS/WireGuard) | Traffic sizes/timing | No | Yes (availability) |
+| Guardian | Everything the kid can read, while access lasts | As the kid | Anything the kid can sign; add guardians | As the kid |
+| Removed guardian | What the kid could read up to the removal; pending spaces until rotated | Up to the removal | With the operator: a fake identity for a kid's fresh device; races in spaces the kid administers | Via the operator only |

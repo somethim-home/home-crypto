@@ -2,6 +2,92 @@
 
 **Status: unreviewed — do not use for real data before an external review.**
 
+The end-to-end encryption format of Home Files, the family file storage of
+[Home](https://github.com/somethim-home/home), a self-hosted home server written in Rust. This crate decides
+which [age](https://c2sp.org/age) file is encrypted to which recipients and signed by whom, so that the server
+stores and serves files without ever being able to read them. It is a library only: no I/O, no networking, no
+storage.
+
+## Overview
+
+### Where it sits
+
+```mermaid
+flowchart LR
+    subgraph Clients["Home apps (desktop, Android, web)"]
+        App["home-app / home-files-app"]
+        HC1["home-crypto<br/>(encrypt, decrypt, sign, verify)"]
+        App --> HC1
+    end
+    subgraph Server["home-server (Home repo)"]
+        Files["home-files<br/>stores ciphertext, membership, quotas"]
+        HC2["home-crypto<br/>(validates ids and public keys only)"]
+        Auth["home-auth + latchkey<br/>(sign-in)"]
+        Files --> HC2
+    end
+    Infra["infra repo<br/>(deploys home-server on the owner's tailnet)"]
+    Clients -- "HTTPS: age files,<br/>signed records, manifests" --> Server
+    Infra -. "runs the image" .-> Server
+```
+
+| Repository | Role | Relation to this crate |
+| --- | --- | --- |
+| [home-crypto](https://github.com/somethim-home/home-crypto) (this one) | The encryption format and its reference implementation | — |
+| [home](https://github.com/somethim-home/home) | The server (`home-server`, `home-files`) and the apps | Path dependency (`../home-crypto`). Clients encrypt and decrypt with it; the server uses it only to validate ids and published keys and never holds a key. |
+| [latchkey](https://github.com/somethim/latchkey) ([crates.io](https://crates.io/crates/latchkey)) | Sign-in building blocks (passwords, TOTP, passkeys, sessions) | Independent. Signing in to Home does **not** unlock files: unlocking needs the person's passphrase or recovery key. |
+| [infra](https://github.com/somethim-home/infra) | Ansible, compose stacks and the release flow of the owner's server | Deploys the Home image that contains this crate. Nothing in infra touches keys. |
+
+### How it works, in short
+
+- Every person has an **identity**: an X25519 grant identity (its recipient is public, so others can invite
+  them), an X25519 keyring identity (secret) and an Ed25519 signing key. The identity is stored on the server
+  only as two age files: one sealed with the person's passphrase (scrypt), one sealed to a printed recovery key.
+- A **space** (a private space, or a shared one such as "Family") has one X25519 identity per **epoch**.
+  Objects and the manifest of the space are encrypted to the current epoch's recipient, which the server never
+  sees.
+- Joining a space is a **grant**: the space identity encrypted to the new member's grant recipient and signed
+  by an admin. Membership is a signed **roster**; removing someone is a signed **rotation** to a new epoch,
+  after which objects are re-encrypted.
+- A person's **keyring** (all their spaces, epochs and pinned verifying keys of other people) is one age file
+  encrypted to their keyring recipient, with a version counter that detects rollback.
+- The **manifest** (names, folders, sizes, times, hashes) is encrypted too, in segments that merge
+  deterministically, so the server sees opaque object ids and sizes, not names.
+
+The exact format is [docs/format.md](docs/format.md); what it protects against, and what it does not, is
+[docs/threat-model.md](docs/threat-model.md). All documents are listed in [docs/README.md](docs/README.md).
+
+### Security model in short
+
+- Protected against the server operator, a stolen disk or backup, and network attackers: file contents and
+  names, and forged invitations or membership changes from people whose keys you have pinned.
+- Not protected: metadata (object ids, sizes, times, membership, access patterns), first contact (trust on first
+  use of the key the server publishes), a malicious member or admin, a malicious web bundle, quantum attacks.
+- Built only on age (`=0.12.1`) and `ed25519-dalek` (`=3.0.0`); no home-made primitives. The composition is
+  our own design and is **pending an external review**; see [SECURITY.md](SECURITY.md) for reporting problems.
+
+### Running it
+
+It is a plain Rust library; no services are needed:
+
+```
+cargo test                                     # unit, flow, property and vector tests
+cargo check --target wasm32-unknown-unknown    # the web client's target
+```
+
+More checks, fuzzing and the test vectors are under [Building and checking](#building-and-checking).
+There is no deployment of its own: the [home](https://github.com/somethim-home/home) image compiles it in, and
+the [infra](https://github.com/somethim-home/infra) repository deploys that image. It is not published to
+crates.io yet (`publish = false`).
+
+### Specific to Home versus reusable
+
+The crate has no knowledge of Home's server, URLs or the owner's setup; the only Home-specific parts are the
+names of the record types and the share-link shape (`https://<host>/s/<space-id>#v1:…`). It can be reused by any
+application that needs the same model (person identities, spaces with epochs, signed grants and rosters, an
+encrypted mergeable manifest), with the caveat above: it is unreviewed.
+
+## Details
+
 End-to-end encryption for Home Files, the family file storage on the home server. One Rust crate shared by every
 client (desktop, Android, web via wasm, iOS later via uniffi) and by the `home-files` backend, which uses it for
 format validation only and never holds a key.

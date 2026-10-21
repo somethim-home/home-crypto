@@ -1,7 +1,7 @@
 # Threat model — Home Files end-to-end encryption
 
-Status: draft, unreviewed. Companion to `docs/format.md`. Source plans: infra `022-home-files-age-e2ee.md`,
-`012-home-server-hardware-goal.md` ("Confirmed storage decision — private E2EE plus shared locations").
+Status: draft, unreviewed. Companion to `docs/format.md`. It follows the owner's (private) planning notes for
+Home Files, whose storage decision is "private E2EE plus shared locations".
 
 ## Scope
 
@@ -37,7 +37,7 @@ security of the devices themselves.
 | Server operator / root | Full control of the server: reads and modifies all stored files, databases and logs, sees all traffic metadata, can replace server code and the web client bundle, can withhold, reorder, replay or delete data. |
 | Stolen server disk or backup | Read-only copy of everything stored at one point in time. No running code. |
 | Removed member | Was a member; keeps every identity and every plaintext they had before removal; may still have network access to the server via another space or may collude with the operator. |
-| Network attacker | On the tailnet now, on the internet once the server is exposed (plan 007 static-IP step). Can observe and tamper with traffic outside TLS/WireGuard and attack the server's public surface. |
+| Network attacker | On the tailnet now, on the internet if the server is ever exposed publicly. Can observe and tamper with traffic outside TLS/WireGuard and attack the server's public surface. |
 | Device thief | Has one unlocked or locked client device. |
 | Kid | A person whose identity has guardians (format §9). Trusted with their own data; not trusted to manage membership of the household. |
 | Guardian | The owner (always) or a parent the owner added. Holds the kid's identity whenever they unlock it, so everything the kid can read, and the kid's signing key. Trusted by the household with the kid's data. |
